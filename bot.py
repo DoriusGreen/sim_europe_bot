@@ -31,7 +31,7 @@ THANK_YOU_TAG = "<SEND_THANK_YOU>"
 
 # ==== Стандартні повідомлення ====
 ORDER_INFO_REQUEST = (
-    "🛒 Для *оформлення замовлення* напишіть:\n\n"
+    "🛒 Для оформлення замовлення напишіть:\n\n"
     "1. Ім'я та прізвище.\n"
     "2. Номер телефону.\n"
     "3. Місто та № відділення \"Нової Пошти\".\n"
@@ -88,24 +88,12 @@ DISPLAY = {
 def normalize_country(name: str) -> str:
     n = (name or "").strip().upper()
     # Синоніми (розширено)
-    if n in ("АНГЛІЯ", "БРИТАНІЯ", "UK", "U.K.", "UNITED KINGDOM", "ВБ", "ЮК", "+44", "юк", "GREAT BRITAIN"):
+    if n in ("АНГЛІЯ", "БРИТАНІЯ", "UK", "U.K.", "UNITED KINGDOM", "ВБ", "GREAT BRITAIN"):
         return "ВЕЛИКОБРИТАНІЯ"
     if n in ("USA", "U.S.A.", "UNITED STATES", "UNITED STATES OF AMERICA", "ШТАТИ", "АМЕРИКА", "US", "U.S."):
         return "США"
     return n
 
-def canonical_operator(op: Optional[str]) -> Optional[str]:
-    """Повертає канонічні назви операторів для Англії або None."""
-    if not op:
-        return None
-    o = op.strip().lower()
-    if o in ("o2", "о2"):
-        return "O2"
-    if o in ("lebara", "леbara", "лебара"):
-        return "Lebara"
-    if o in ("vodafone", "водафон", "водофон"):
-        return "Vodafone"
-    return None  # якщо GPT/клієнт передав щось інше — не показуємо
 
 def unit_price(country_norm: str, qty: int) -> Optional[int]:
     tiers = PRICE_TIERS.get(country_norm)
@@ -116,6 +104,55 @@ def unit_price(country_norm: str, qty: int) -> Optional[int]:
             return price
     return None
 
+# ==== Прайс-рендеринг ====
+
+def _format_range(min_q: int, max_q: Optional[int]) -> str:
+    if max_q is None:
+        return f"{min_q}+ шт."
+    if min_q == max_q:
+        return f"{min_q} шт."
+    return f"{min_q}-{max_q} шт."
+
+def render_price_block(country_key: str) -> str:
+    flag = FLAGS.get(country_key, "")
+    header = f"{flag} {country_key} {flag}\n\n"
+    tiers = PRICE_TIERS.get(country_key, [])
+    if not tiers:
+        return header + "Немає даних.\n\n"
+
+    tiers_sorted = sorted(tiers, key=lambda x: x[0])
+    lines = []
+    inserted_gap = False
+    for idx, (min_q, price) in enumerate(tiers_sorted):
+        next_min = tiers_sorted[idx + 1][0] if idx + 1 < len(tiers_sorted) else None
+        max_q = (next_min - 1) if next_min else None
+
+        # Вставляємо один відступ перед секцією 100+ (як у прикладі)
+        if not inserted_gap and min_q >= 100 and idx > 0:
+            lines.append("")
+            inserted_gap = True
+
+        qty_part = _format_range(min_q, max_q)
+        if price is None:
+            line = f"{qty_part} — договірна"
+        else:
+            line = f"{qty_part} — {price} грн"
+        lines.append(line)
+
+    return header + "\n".join(lines) + "\n\n"
+
+def render_prices(countries: List[str]) -> str:
+    if not countries:
+        countries = list(PRICE_TIERS.keys())
+    blocks = []
+    for c in countries:
+        key = normalize_country(c).upper()
+        if key in PRICE_TIERS:
+            blocks.append(render_price_block(key))
+    if not blocks:
+        blocks = [render_price_block(k) for k in PRICE_TIERS.keys()]
+    return "".join(blocks)
+
 # ==== Шаблони підсумку ====
 ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн  \n"
 
@@ -123,8 +160,6 @@ ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн  \n"
 class OrderItem:
     country: str
     qty: int
-    # НОВЕ: опціональний оператор для Англії
-    operator: Optional[str] = None
 
 @dataclass
 class OrderData:
@@ -134,6 +169,7 @@ class OrderData:
     np: str
     items: List[OrderItem]
 
+
 def render_order(order: OrderData) -> str:
     lines = []
     grand_total = 0
@@ -141,12 +177,7 @@ def render_order(order: OrderData) -> str:
 
     for it in order.items:
         c_norm = normalize_country(it.country)
-        # додамо (оператор X) лише для Англії, якщо задано коректного оператора
-        disp_base = DISPLAY.get(c_norm, it.country.strip().title())
-        op = canonical_operator(getattr(it, "operator", None))
-        op_suf = f" (оператор {op})" if (op and c_norm == "ВЕЛИКОБРИТАНІЯ") else ""
-        disp = disp_base + op_suf
-
+        disp = DISPLAY.get(c_norm, it.country.strip().title())
         flag = FLAGS.get(c_norm, "")
         price = unit_price(c_norm, it.qty)
 
@@ -186,14 +217,7 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
         return None
     try:
         data = json.loads(m.group(0))
-        items = [
-            OrderItem(
-                country=i["country"],
-                qty=int(i["qty"]),
-                operator=i.get("operator")
-            )
-            for i in data.get("items", [])
-        ]
+        items = [OrderItem(country=i["country"], qty=int(i["qty"])) for i in data.get("items", [])]
         return OrderData(
             full_name=data.get("full_name", "").strip(),
             phone=data.get("phone", "").strip(),
@@ -203,6 +227,21 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
         )
     except Exception as e:
         logger.warning(f"Не вдалося розпарсити JSON: {e}")
+        return None
+
+# ==== Парсер запиту на ціни ====
+PRICE_JSON_RE = re.compile(r"\{[\s\S]*\}")
+
+def try_parse_price_json(text: str) -> Optional[List[str]]:
+    m = PRICE_JSON_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+        if data.get("ask_prices") is True and isinstance(data.get("countries"), list):
+            return data["countries"]
+        return None
+    except Exception:
         return None
 
 # ==== СИСТЕМНИЙ ПРОМПТ (посилено під семантику GPT) ====
@@ -242,15 +281,25 @@ def build_system_prompt() -> str:
         '  "phone": "0XX-XXXX-XXX",\n'
         '  "city": "Місто",\n'
         '  "np": "Номер відділення або поштомат",\n'
-        '  "items": [ {"country":"КРАЇНА","qty":N,"operator":"O2|Lebara|Vodafone"}, ... ]\n'
+        '  "items": [ {"country":"КРАЇНА","qty":N}, ... ]\n'
         "}\n\n"
+
+        # Режим цін/наявності
+        "Якщо користувач запитує ПРО ЦІНИ або про наявність країн — ВІДПОВІДАЙ ЛИШЕ JSON:\n"
+        "{\n"
+        '  "ask_prices": true,\n'
+        '  "countries": ["ALL" або перелік ключів, напр. "ВЕЛИКОБРИТАНІЯ","США"]\n'
+        "}\n\n"
+        "Правила:\n"
+        "• Визначай країни семантично за змістом повідомлення (без ключових слів).\n"
+        "• У масиві countries використовуй ТІЛЬКИ ці ключі: ВЕЛИКОБРИТАНІЯ, НІДЕРЛАНДИ, НІМЕЧЧИНА, ФРАНЦІЯ, ІСПАНІЯ, ЧЕХІЯ, ПОЛЬЩА, ЛИТВА, ЛАТВІЯ, КАЗАХСТАН, МАРОККО, США.\n"
+        "• Якщо запит загальний (типу: які є країни і ціни?) — поверни countries: [\"ALL\"].\n"
+        "• Не наводь самі ціни — лише JSON, без зайвого тексту.\n\n"
 
         # Інструкції для семантичного парсингу
         "Семантика:\n"
-        "• Розумій країни за синонімами/містами/мовою (UK/United Kingdom/+44/Британія/Лондон → ВЕЛИКОБРИТАНІЯ; USA/Америка/Штати → США).\n"
+        "• Розумій країни за синонімами/містами/мовою (UK/United Kingdom/Британія/Лондон → ВЕЛИКОБРИТАНІЯ; USA/Америка/Штати → США).\n"
         "• Країну в JSON бажано повертай у вигляді одного з ключів: ВЕЛИКОБРИТАНІЯ, НІДЕРЛАНДИ, НІМЕЧЧИНА, ФРАНЦІЯ, ІСПАНІЯ, ЧЕХІЯ, ПОЛЬЩА, ЛИТВА, ЛАТВІЯ, КАЗАХСТАН, МАРОККО, США.\n"
-        "• Якщо клієнт для Англії явно називає оператора (O2, Lebara або Vodafone) — додай у відповідний елемент масиву items поле \"operator\" з точним значенням \"O2\"/\"Lebara\"/\"Vodafone\". Якщо НЕ називає — не додавай поле \"operator\".\n"
-        "• До назв операторів (До речі, сам операторів на вибір клієнтам не пропонуй! Лише якщо вони запитують про операторів самі.) застосовуй канонічні форми: O2, Lebara, Vodafone (без здогадок).\n"
         "• Текстові кількості (\"пара\", \"десяток\", \"кілька\") конвертуй у конкретне число або попроси уточнити через пункт 4.\n"
         "• Якщо дані суперечливі — попроси саме відсутні/неясні пункти через формат \"📝 Залишилось вказати: ...\".\n\n"
 
@@ -344,6 +393,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(summary)
         await update.message.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
+        return
+
+    # Перевіряємо, чи це запит на ціни
+    price_countries = try_parse_price_json(reply_text)
+    if price_countries is not None:
+        want_all = any(str(c).upper() == "ALL" for c in price_countries)
+        if want_all:
+            countries = list(PRICE_TIERS.keys())
+        else:
+            norm = [normalize_country(str(c)).upper() for c in price_countries]
+            countries = [c for c in norm if c in PRICE_TIERS]
+        price_msg = render_prices(countries)
+
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": price_msg})
+        _prune_history(history)
+        await update.message.reply_text(price_msg)
         return
 
     # Інакше — звичайна відповідь моделі (включно з 🛒 ORDER_INFO_REQUEST або 📝 список відсутніх полів)
