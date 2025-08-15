@@ -70,7 +70,6 @@ FLAGS = {
     "США": "🇺🇸",
 }
 
-# Для відображення назв у підсумку (твій приклад: Англія, Німеччина)
 DISPLAY = {
     "ВЕЛИКОБРИТАНІЯ": "Англія",
     "НІДЕРЛАНДИ": "Нідерланди",
@@ -105,7 +104,7 @@ def looks_like_order_intent(text: str) -> bool:
     t = (text or "").lower()
     return any(k in t for k in ORDER_INTENT_KEYWORDS)
 
-def contains_any_required_field(text: str) -> bool:
+def contains_any_required_field(text: str) -> tuple[bool, list]:
     t = (text or "").lower()
     # телефон
     has_phone = bool(re.search(r'(\+?3?8?0?\D*\d{2}\D*\d{3,4}\D*\d{3,4})', t)) or bool(re.search(r'\b0\d{2}\D*\d{3,4}\D*\d{3,4}\b', t))
@@ -115,7 +114,15 @@ def contains_any_required_field(text: str) -> bool:
     has_country_word = any(k in t for k in COUNTRY_KEYWORDS)
     has_qty = bool(re.search(r'\d+', t))
     has_country_qty = has_country_word and has_qty
-    return bool(has_phone or has_np or has_country_qty)
+
+    missing = []
+    if not has_phone:
+        missing.append("2. Номер телефону.")
+    if not has_np:
+        missing.append("3. Місто та № відділення \"Нової Пошти\".")
+    if not has_country_qty:
+        missing.append("4. Країна(и) та кількість sim-карт.")
+    return (has_phone or has_np or has_country_qty, missing)
 
 def normalize_country(name: str) -> str:
     n = (name or "").strip().upper()
@@ -125,7 +132,6 @@ def normalize_country(name: str) -> str:
     if n in ("USA", "UNITED STATES", "ШТАТИ"):
         return "США"
     return n
-
 
 def unit_price(country_norm: str, qty: int) -> Optional[int]:
     tiers = PRICE_TIERS.get(country_norm)
@@ -137,9 +143,7 @@ def unit_price(country_norm: str, qty: int) -> Optional[int]:
     return None
 
 # ==== Шаблони підсумку ====
-# Дві прогалини наприкінці деяких рядків залишаємо (як у твоєму прикладі)
 ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн  \n"
-# Якщо країн 2+ — додаємо "Загальна сумма" наприкінці
 
 @dataclass
 class OrderItem:
@@ -155,9 +159,6 @@ class OrderData:
     items: List[OrderItem]
 
 def render_order(order: OrderData) -> str:
-    """Рендерить підсумок у точному форматі з прикладу.
-       «Загальна сумма» показується тільки якщо країн 2+. UK 1000+ = договірна (не додаємо в загальну).
-    """
     lines = []
     grand_total = 0
     counted_countries = 0
@@ -168,7 +169,7 @@ def render_order(order: OrderData) -> str:
         flag = FLAGS.get(c_norm, "")
         price = unit_price(c_norm, it.qty)
 
-        if price is None:  # договірна
+        if price is None:
             line_total_str = "договірна"
         else:
             line_total = price * it.qty
@@ -180,7 +181,6 @@ def render_order(order: OrderData) -> str:
             flag=flag, disp=disp, qty=it.qty, line_total=line_total_str
         ))
 
-    # Шапка (з порожнім рядком після міста/НП)
     header = (
         f"{order.full_name} \n"
         f"{order.phone}\n"
@@ -189,7 +189,6 @@ def render_order(order: OrderData) -> str:
 
     body = "".join(lines) + "\n"
 
-    # «Загальна сумма» тільки якщо є 2+ країн із числовою сумою
     if counted_countries >= 2:
         footer = f"Загальна сумма: {grand_total} грн\n"
     else:
@@ -309,7 +308,7 @@ async def _ask_gpt(history: List[Dict[str, str]], user_message: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Привіт! Я допоможу з SIM-картами: підкажу по країнах, цінах та оформлю замовлення. "
-        "Напишіть, будь ласка, для якої країни(країн) і скільки штук потрібно — і, якщо готові, "
+        "Напишіть, будь ласка, для якої країни( країн) і скільки штук потрібно — і, якщо готові, "
         "одразу вкажіть дані для доставки (ПІБ, телефон, місто й № відділення/поштомату НП)."
     )
     await update.message.reply_text(text)
@@ -319,26 +318,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text.strip() if update.message and update.message.text else ""
     history = _ensure_history(context)
 
-    # Якщо користувач хоче оформити, але ще не надав жодного поля — шлемо базовий блок 🛒
-    if looks_like_order_intent(user_message) and not contains_any_required_field(user_message):
+    # Перевірка наявності даних у поточному повідомленні
+    has_fields, missing_fields = contains_any_required_field(user_message)
+
+    # Якщо намір замовлення, але жодних полів немає — просимо все
+    if looks_like_order_intent(user_message) and not has_fields:
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": ORDER_INFO_REQUEST})
         _prune_history(history)
         await update.message.reply_text(ORDER_INFO_REQUEST)
         return
 
-    # Виклик до GPT з пам'яттю
+    # Якщо є хоча б одне поле, але не всі — формуємо уточнення
+    if has_fields and missing_fields:
+        response = "📝 Залишилось вказати:\n\n" + "\n".join(missing_fields)
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": response})
+        _prune_history(history)
+        await update.message.reply_text(response)
+        return
+
+    # Виклик до GPT з пам'яттю для інших випадків
     reply_text = await _ask_gpt(history, user_message)
 
-    # 1) Якщо модель віддала "просимо відсутні пункти", виправляємо заголовок на емодзі якщо треба
+    # Якщо модель віддала "просимо відсутні пункти", виправляємо заголовок на емодзі
     if "Залишилось вказати:" in reply_text and "📝 Залишилось вказати:" not in reply_text:
         reply_text = reply_text.replace("Залишилось вказати:", "📝 Залишилось вказати:")
 
-    # 2) Якщо прийшов JSON повного замовлення — парсимо, рахуємо, рендеримо шаблон
+    # Якщо прийшов JSON повного замовлення — парсимо, рахуємо, рендеримо шаблон
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
         summary = render_order(parsed)
-        # Памʼять
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": summary})
         _prune_history(history)
