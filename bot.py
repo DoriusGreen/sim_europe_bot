@@ -302,6 +302,28 @@ def missing_points_from_reply(text: str) -> Set[int]:
             out.add(int(m.group(1)))
     return out
 
+# ==== Блок інструкції США (для надсилання як окремого повідомлення) ====
+US_ACTIVATION_MSG = (
+    "США, на відміну від інших, потребують поповнення для активації. Після поповнення SIM працюватиме на прийом SMS.\n\n"
+    "Як активувати та поповнити сім-карту США?\n\n"
+    "https://www.lycamobile.us/en/activate-sim\n"
+    "1. На цьому сайті вводите дані сімки для її попередньої активації. Отриманий на сайті номер сім-карти записуєте.\n\n"
+    "https://www.lycamobile.us/en/quick-top-up/\n"
+    "2. Далі, ось тут, вказавши номер, отриманий на попередньому сайті, поповнюєте сім-карту, після поповнення (мінімум на 23$) вона стане активною та буде приймати SMS."
+)
+
+def user_mentions_usa(text: str) -> bool:
+    t = (text or "").lower()
+    if re.search(r"\b(сша|usa|u\.s\.a\.|united states|штат[а-яіїє]+|америк[аи])\b", t):
+        return True
+    if re.search(r"(^|\s)\+1(\s|$)", t):
+        return True
+    return False
+
+def contains_us_activation_block(text: str) -> bool:
+    t = (text or "").lower()
+    return ("lycamobile.us/en/activate-sim" in t) or ("як активувати та поповнити сім-карту сша" in t)
+
 # ==== СИСТЕМНІ ПРОМПТИ ====
 def build_system_prompt() -> str:
     return (
@@ -532,7 +554,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
         return
 
-    # 3) Режим цін
+    # 3) Режим цін/наявності
     price_countries = try_parse_price_json(reply_text)
     if price_countries is not None:
         want_all = any(str(c).upper() == "ALL" for c in price_countries)
@@ -541,17 +563,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if c in PRICE_TIERS
         ]
         price_msg = render_prices(countries)
+
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": price_msg})
         _prune_history(history)
+
         await update.message.reply_text(price_msg)
 
-        # 3a) Фоллоу-ап (інші частини питання)
+        # 3a) Якщо запит включає США (ціна/наявність США), надіслати інструкцію США
+        usa_intent = ("США" in countries and (len(countries) == 1 or user_mentions_usa(user_message)))
+        usa_activation_sent = False
+        if usa_intent:
+            await update.message.reply_text(US_ACTIVATION_MSG)
+            usa_activation_sent = True
+
+        # 3b) Фоллоу-ап (інші частини питання)
         follow = await _ask_gpt_followup(history, user_message)
         if is_meaningful_followup(follow):
-            history.append({"role": "assistant", "content": follow})
-            _prune_history(history)
-            await update.message.reply_text(follow)
+            # уникаємо дубля інструкції США, якщо вже відправили
+            if not (usa_activation_sent and contains_us_activation_block(follow)):
+                history.append({"role": "assistant", "content": follow})
+                _prune_history(history)
+                await update.message.reply_text(follow)
         return
 
     # 4) Якщо модель каже, що бракує лише пункту 4 — пробуємо «force point 4»
