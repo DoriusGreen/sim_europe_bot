@@ -55,12 +55,11 @@ PRICE_TIERS = {
     "США":            [(10, 1000), (4, 1300), (1, 1400)],
 }
 
-# Додаткові ціни для операторів у Великобританії (фіксовані приклади, можна розширити)
+# Додаткові ціни для операторів у Великобританії
 OPERATOR_PRICES_UK = {
-    "o2": {5: 1500},  # Приклад: 1500 грн за 5 шт
-    "Lebara": {5: 1450},  # Приклад: 1450 грн за 5 шт
-    "Vodafone": {5: 1600},  # Приклад: 1600 грн за 5 шт
-    # Додай інші кількості чи оператори за потреби
+    "o2": {5: 1500},
+    "Lebara": {5: 1450},
+    "Vodafone": {5: 1600},
 }
 
 FLAGS = {
@@ -131,7 +130,7 @@ def contains_any_required_field(text: str) -> tuple[bool, list]:
     if not has_np:
         missing.append("3. Місто та № відділення \"Нової Пошти\".")
     if not has_country_qty:
-        missing.append("4. Країна(и) та кількість sim-карт (можна вказати оператора, наприклад, o2, Lebara, Vodafone для Англії).")
+        missing.append("4. Країна(и) та кількість sim-карт.")
     return (has_phone or has_np or has_country_qty, missing)
 
 def normalize_country(name: str) -> str:
@@ -153,7 +152,7 @@ def extract_operator(text: str) -> Optional[str]:
 def unit_price(country_norm: str, qty: int, operator: Optional[str] = None) -> Optional[int]:
     if country_norm == "ВЕЛИКОБРИТАНІЯ" and operator and operator.lower() in OPERATOR_PRICES_UK:
         operator_prices = OPERATOR_PRICES_UK[operator.lower()]
-        return operator_prices.get(qty)  # Повертаємо фіксовану ціну для оператора, якщо є
+        return operator_prices.get(qty)
     tiers = PRICE_TIERS.get(country_norm)
     if not tiers:
         return None
@@ -194,7 +193,7 @@ def render_order(order: OrderData) -> str:
         if price is None:
             line_total_str = "договірна"
         else:
-            line_total = price * it.qty if not operator else price  # Фіксована ціна для оператора
+            line_total = price * it.qty if not operator else price
             grand_total += line_total
             counted_countries += 1
             line_total_str = str(line_total)
@@ -232,7 +231,7 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
             OrderItem(
                 country=i["country"],
                 qty=int(i["qty"]),
-                operator=i.get("operator")  # Додаємо оператора, якщо є в JSON
+                operator=i.get("operator")
             ) for i in data.get("items", [])
         ]
         return OrderData(
@@ -257,14 +256,14 @@ def build_system_prompt() -> str:
         "1. Ім'я та прізвище.\n"
         "2. Номер телефону.\n"
         "3. Місто та № відділення «Нової Пошти».\n"
-        "4. Країна(и) та кількість sim-карт (можна вказати оператора, наприклад, o2, Lebara, Vodafone для Англії).\n\n"
+        "4. Країна(и) та кількість sim-карт.\n\n"
 
         "Якщо бракує ДЕЯКИХ пунктів — відповідай СУВОРО в такому вигляді (без зайвого тексту до/після):\n"
         "📝 Залишилось вказати:\n"
         "\n"
         "<залиши лише відсутні рядки з їхніми номерами, напр.>\n"
         "2. Номер телефону.\n"
-        "4. Країна(и) та кількість sim-карт (можна вказати оператора, наприклад, o2, Lebara, Vodafone для Англії).\n\n"
+        "4. Країна(и) та кількість sim-карт.\n\n"
 
         "Коли ВСІ дані є — ВІДПОВІДАЙ ЛИШЕ JSON за схемою (без підсумку, без зайвого тексту):\n"
         "{\n"
@@ -274,6 +273,9 @@ def build_system_prompt() -> str:
         '  "np": "Номер відділення або поштомат",\n'
         '  "items": [ {"country":"КРАЇНА","qty":N, "operator":"OPERATOR"}, ... ]\n'
         "}\n\n"
+
+        "Якщо клієнт хоче зробити нове замовлення (наприклад, пише 'хочу купити' або подібне), використовуй дані з попереднього замовлення, якщо вони є, і додай у відповідь:\n"
+        "'Використано попередні дані: [ПІБ], [телефон], [місто] № [НП]. Вкажіть, будь ласка, лише нові дані, якщо вони змінилися, або додайте країну та кількість SIM-карт.'\n\n"
 
         "Після того, як ти віддаєш JSON, бекенд сам порахує ціни/суми та сформує підсумок у потрібному форматі. "
         "«Загальна сумма» показується тільки якщо країн 2 або більше.\n\n"
@@ -316,6 +318,27 @@ def _prune_history(history: List[Dict[str, str]]) -> None:
     if len(history) > MAX_TURNS * 2:
         del history[: len(history) - MAX_TURNS * 2]
 
+def _save_last_order(ctx: ContextTypes.DEFAULT_TYPE, order: OrderData) -> None:
+    ctx.chat_data["last_order"] = {
+        "full_name": order.full_name,
+        "phone": order.phone,
+        "city": order.city,
+        "np": order.np,
+        "items": [{"country": i.country, "qty": i.qty, "operator": i.operator} for i in order.items]
+    }
+
+def _get_last_order(ctx: ContextTypes.DEFAULT_TYPE) -> Optional[OrderData]:
+    last_order_data = ctx.chat_data.get("last_order")
+    if last_order_data:
+        return OrderData(
+            full_name=last_order_data["full_name"],
+            phone=last_order_data["phone"],
+            city=last_order_data["city"],
+            np=last_order_data["np"],
+            items=[OrderItem(country=i["country"], qty=i["qty"], operator=i.get("operator")) for i in last_order_data["items"]]
+        )
+    return None
+
 async def _ask_gpt(history: List[Dict[str, str]], user_message: str) -> str:
     messages = [{"role": "system", "content": build_system_prompt()}]
     messages.extend(history)
@@ -350,6 +373,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Перевірка наявності даних у поточному повідомленні
     has_fields, missing_fields = contains_any_required_field(user_message)
 
+    # Якщо є попереднє замовлення і намір нового — пропонуємо використати його
+    last_order = _get_last_order(context)
+    if looks_like_order_intent(user_message) and last_order and not has_fields:
+        response = (
+            f"Використано попередні дані: {last_order.full_name}, {last_order.phone}, {last_order.city} № {last_order.np}. "
+            "Вкажіть, будь ласка, лише нові дані, якщо вони змінилися, або додайте країну та кількість SIM-карт."
+        )
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": response})
+        _prune_history(history)
+        await update.message.reply_text(response)
+        return
+
     # Якщо намір замовлення і немає жодних полів — просимо все
     if looks_like_order_intent(user_message) and not has_fields:
         history.append({"role": "user", "content": user_message})
@@ -378,6 +414,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
         summary = render_order(parsed)
+        _save_last_order(context, parsed)  # Зберігаємо останнє замовлення
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": summary})
         _prune_history(history)
