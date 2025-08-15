@@ -94,6 +94,18 @@ def normalize_country(name: str) -> str:
         return "США"
     return n
 
+def canonical_operator(op: Optional[str]) -> Optional[str]:
+    """Повертає канонічні назви операторів для Англії або None."""
+    if not op:
+        return None
+    o = op.strip().lower()
+    if o in ("o2", "о2"):
+        return "O2"
+    if o in ("lebara", "леbara", "лебара"):
+        return "Lebara"
+    if o in ("vodafone", "водафон", "водофон"):
+        return "Vodafone"
+    return None  # якщо GPT/клієнт передав щось інше — не показуємо
 
 def unit_price(country_norm: str, qty: int) -> Optional[int]:
     tiers = PRICE_TIERS.get(country_norm)
@@ -111,6 +123,8 @@ ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн  \n"
 class OrderItem:
     country: str
     qty: int
+    # НОВЕ: опціональний оператор для Англії
+    operator: Optional[str] = None
 
 @dataclass
 class OrderData:
@@ -120,7 +134,6 @@ class OrderData:
     np: str
     items: List[OrderItem]
 
-
 def render_order(order: OrderData) -> str:
     lines = []
     grand_total = 0
@@ -128,7 +141,12 @@ def render_order(order: OrderData) -> str:
 
     for it in order.items:
         c_norm = normalize_country(it.country)
-        disp = DISPLAY.get(c_norm, it.country.strip().title())
+        # додамо (оператор X) лише для Англії, якщо задано коректного оператора
+        disp_base = DISPLAY.get(c_norm, it.country.strip().title())
+        op = canonical_operator(getattr(it, "operator", None))
+        op_suf = f" (оператор {op})" if (op and c_norm == "ВЕЛИКОБРИТАНІЯ") else ""
+        disp = disp_base + op_suf
+
         flag = FLAGS.get(c_norm, "")
         price = unit_price(c_norm, it.qty)
 
@@ -162,14 +180,20 @@ def render_order(order: OrderData) -> str:
 # ==== JSON парсер відповіді моделі ====
 ORDER_JSON_RE = re.compile(r"\{[\s\S]*\}")
 
-
 def try_parse_order_json(text: str) -> Optional[OrderData]:
     m = ORDER_JSON_RE.search(text or "")
     if not m:
         return None
     try:
         data = json.loads(m.group(0))
-        items = [OrderItem(country=i["country"], qty=int(i["qty"])) for i in data.get("items", [])]
+        items = [
+            OrderItem(
+                country=i["country"],
+                qty=int(i["qty"]),
+                operator=i.get("operator")
+            )
+            for i in data.get("items", [])
+        ]
         return OrderData(
             full_name=data.get("full_name", "").strip(),
             phone=data.get("phone", "").strip(),
@@ -218,13 +242,15 @@ def build_system_prompt() -> str:
         '  "phone": "0XX-XXXX-XXX",\n'
         '  "city": "Місто",\n'
         '  "np": "Номер відділення або поштомат",\n'
-        '  "items": [ {"country":"КРАЇНА","qty":N}, ... ]\n'
+        '  "items": [ {"country":"КРАЇНА","qty":N,"operator":"O2|Lebara|Vodafone"}, ... ]\n'
         "}\n\n"
 
         # Інструкції для семантичного парсингу
         "Семантика:\n"
         "• Розумій країни за синонімами/містами/мовою (UK/United Kingdom/Британія/Лондон → ВЕЛИКОБРИТАНІЯ; USA/Америка/Штати → США).\n"
         "• Країну в JSON бажано повертай у вигляді одного з ключів: ВЕЛИКОБРИТАНІЯ, НІДЕРЛАНДИ, НІМЕЧЧИНА, ФРАНЦІЯ, ІСПАНІЯ, ЧЕХІЯ, ПОЛЬЩА, ЛИТВА, ЛАТВІЯ, КАЗАХСТАН, МАРОККО, США.\n"
+        "• Якщо клієнт для Англії явно називає оператора (O2, Lebara або Vodafone) — додай у відповідний елемент масиву items поле \"operator\" з точним значенням \"O2\"/\"Lebara\"/\"Vodafone\". Якщо НЕ називає — не додавай поле \"operator\".\n"
+        "• До назв операторів застосовуй канонічні форми: O2, Lebara, Vodafone (без здогадок).\n"
         "• Текстові кількості (\"пара\", \"десяток\", \"кілька\") конвертуй у конкретне число або попроси уточнити через пункт 4.\n"
         "• Якщо дані суперечливі — попроси саме відсутні/неясні пункти через формат \"📝 Залишилось вказати: ...\".\n\n"
 
@@ -263,17 +289,14 @@ def build_system_prompt() -> str:
         "Стиль: дружелюбно, чітко, без води. Не повторюй уже надані дані."
     )
 
-
 def _ensure_history(ctx: ContextTypes.DEFAULT_TYPE) -> List[Dict[str, str]]:
     if "history" not in ctx.chat_data:
         ctx.chat_data["history"] = []
     return ctx.chat_data["history"]
 
-
 def _prune_history(history: List[Dict[str, str]]) -> None:
     if len(history) > MAX_TURNS * 2:
         del history[: len(history) - MAX_TURNS * 2]
-
 
 async def _ask_gpt(history: List[Dict[str, str]], user_message: str) -> str:
     messages = [{"role": "system", "content": build_system_prompt()}]
@@ -345,7 +368,6 @@ def main():
         url_path="",
         webhook_url=WEBHOOK_URL
     )
-
 
 if __name__ == "__main__":
     main()
