@@ -485,91 +485,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.message.text is None:
         return
-
-    text = update.message.text.strip()
-    order = ensure_user_state(context)
-
-    # 1) Перевірка FAQ
-    faq_key = detect_faq(text)
-    if faq_key:
-        title, answer = FAQ[faq_key]
-        await update.message.reply_text(f"{title}
-
-{answer}")
-        return
-
-    # 2) Парсимо контактні дані (ім'я/телефон/НП), якщо користувач їх кинув одним блоком
-    contact_guess = parse_contact_block(text)
-    for k in ["name", "phone", "np"]:
-        if contact_guess.get(k) and not order.get(k):
-            order[k] = contact_guess[k]
-
-    # 3) Парсимо позиції (країни + кількість)
-    items = parse_items_line(text)
-    for ck, qty in items:
-        add_or_update_item(order, ck, qty)
-
-    # 4) Якщо замовлення вже повне — формуємо підтвердження
-    if all_required_filled(order):
-        summary, _admin = format_order_summary(order)
-        await update.message.reply_text(summary)
-        await update.message.reply_text("Дякуємо за замовлення! Воно буде відправлене протягом 24 годин. 😊")
-        context.user_data["last_order"] = order.copy()
-        context.user_data["order"] = {"name": None, "phone": None, "np": None, "items": []}
-        return
-
-    # 5) Запит на дані — лише якщо є намір оформити
-    if user_intends_order(text, items):
-        miss = missing_fields(order)
-        prompts = {
-            "name": "Будь ласка, вкажіть Ім'я та Прізвище (наприклад: Бондар Анастасія).",
-            "phone": "Вкажіть, будь ласка, номер телефону у форматі +380...",
-            "np": "Напишіть місто та № відділення/поштомату Нової Пошти (наприклад: Ірпінь поштомат 34863).",
-            "items": "Які країни та скільки SIM‑карт потрібно? (можна так: 🇬🇧 1; 🇵🇱 2)",
-        }
-        # Якщо користувач натякнув на країну, але без кількості — попросимо кількість
-        if items and any(qty is None for _, qty in items):
-            await update.message.reply_text("Скільки штук потрібно?")
-            return
-        next_field = miss[0] if miss else "items"
-        await update.message.reply_text(prompts[next_field])
-        return
-
-    # 6) Інакше — передаємо у GPT для уточнення наміру/відповіді (без дублювання прайсу)
-    try:
-        sys_prompt = (
-            "Ти — дружелюбний і корисний Telegram‑бот магазину SIM‑карт. Відповідай лаконічно українською.
-"
-            "Спершу з'ясуй намір користувача (питання чи замовлення). Не проси персональні дані, доки намір не очевидний.
-"
-            "Не надсилай перелік цін самостійно, якщо користувач явно його не просить (його шле інша система).
-"
-            "Коли намір оформити замовлення — збери: ім'я+прізвище, телефон, місто+№ НП, країни+кількість.
-"
-            "Ось прайс для довідки (НЕ вставляй його у відповідь без запиту):
-
-" + PRICE_LIST_TEXT + "
-
-" + US_NOTE + "
-
-"
-            "FAQ довідково: активація/месенджери/поповнення/активність/тарифи.
-"
-        )
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": text},
-            ],
-            max_tokens=400,
-            temperature=0.4,
-        )
-        ai_text = resp.choices[0].message["content"].strip()
-        if ai_text:
-            await update.message.reply_text(ai_text)
     except Exception as e:
         logger.warning(f"GPT fallback error: {e}")
+
 
     text = update.message.text.strip()
     order = ensure_user_state(context)
