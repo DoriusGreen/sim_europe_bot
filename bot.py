@@ -94,6 +94,20 @@ def normalize_country(name: str) -> str:
         return "США"
     return n
 
+# ---------- ОПЕРАТОРИ ДЛЯ АНГЛІЇ ----------
+def canonical_operator(op: Optional[str]) -> Optional[str]:
+    """Повертає канонічні назви операторів для Англії або None."""
+    if not op:
+        return None
+    o = op.strip().lower()
+    if o in ("o2", "о2"):
+        return "O2"
+    if o in ("lebara", "лебара"):
+        return "Lebara"
+    if o in ("vodafone", "водафон", "водофон"):
+        return "Vodafone"
+    return None  # якщо GPT/клієнт передав щось інше — не показуємо
+# -----------------------------------------
 
 def unit_price(country_norm: str, qty: int) -> Optional[int]:
     tiers = PRICE_TIERS.get(country_norm)
@@ -127,7 +141,6 @@ def render_price_block(country_key: str) -> str:
         next_min = tiers_sorted[idx + 1][0] if idx + 1 < len(tiers_sorted) else None
         max_q = (next_min - 1) if next_min else None
 
-        # Вставляємо один відступ перед секцією 100+ (як у прикладі)
         if not inserted_gap and min_q >= 100 and idx > 0:
             lines.append("")
             inserted_gap = True
@@ -153,29 +166,76 @@ def render_prices(countries: List[str]) -> str:
         blocks = [render_price_block(k) for k in PRICE_TIERS.keys()]
     return "".join(blocks)
 
+# ==== Форматування ПІДСУМКУ (імʼя/місто/тел/№) ====
+
+def _cap_word(w: str) -> str:
+    return w[:1].upper() + w[1:].lower() if w else w
+
+def _smart_title(s: str) -> str:
+    # Капіталізація слів та частин через дефіс
+    s = (s or "").strip()
+    parts = re.split(r"\s+", s)
+    out = []
+    for p in parts:
+        sub = "-".join(_cap_word(x) for x in p.split("-"))
+        out.append(sub)
+    return " ".join(out)
+
+def format_full_name(name: str) -> str:
+    # Прибираємо по-батькові: беремо перше і останнє слово
+    tokens = [t for t in (name or "").strip().split() if t]
+    if not tokens:
+        return ""
+    if len(tokens) >= 2:
+        return f"{_smart_title(tokens[0])} {_smart_title(tokens[-1])}"
+    return _smart_title(tokens[0])
+
+def format_phone(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 12 and digits.startswith("380"):
+        # Переводимо у локальний 0XXXXXXXXX
+        digits = "0" + digits[3:]
+    if len(digits) == 10:
+        return f"{digits[0:3]} {digits[3:6]} {digits[6:10]}"
+    return (phone or "").strip()
+
+def _split_city_extra(city: str):
+    s = " ".join((city or "").split())
+    # Якщо вже є дужки — лишаємо як є
+    m = re.match(r"(.+?)\s*\((.+)\)\s*$", s)
+    if m:
+        return m.group(1), m.group(2)
+    # Розділяємо по першій комі/крапці з комою/рисці
+    parts = re.split(r"\s*[,;/—–-]\s*", s, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return s, None
+
+def format_city(city: str) -> str:
+    base, extra = _split_city_extra(city)
+    base_fmt = _smart_title(base)
+    if extra:
+        extra_fmt = _smart_title(extra)
+        return f"{base_fmt} ({extra_fmt})"
+    return base_fmt
+
+def format_np(np_str: str) -> str:
+    s = (np_str or "").strip()
+    m = re.search(r"\d+", s)
+    if m:
+        return m.group(0)
+    # fallback: прибрати можливі символи №/# і пробіли
+    s = re.sub(r"[^\d]", "", s)
+    return s or (np_str or "").strip()
+
 # ==== Шаблони підсумку ====
 ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн  \n"
-
-# ---------- ПОВЕРНУТО ОПЕРАТОРИ ДЛЯ АНГЛІЇ ----------
-def canonical_operator(op: Optional[str]) -> Optional[str]:
-    """Повертає канонічні назви операторів для Англії або None."""
-    if not op:
-        return None
-    o = op.strip().lower()
-    if o in ("o2", "о2"):
-        return "O2"
-    if o in ("lebara", "лебара"):
-        return "Lebara"
-    if o in ("vodafone", "водафон", "водофон"):
-        return "Vodafone"
-    return None  # якщо GPT/клієнт передав щось інше — не показуємо
-# ----------------------------------------------------
 
 @dataclass
 class OrderItem:
     country: str
     qty: int
-    # Оператор — опціонально (лише для Англії показуємо в підсумку)
+    # оператор — опціонально (лише для Англії показуємо в підсумку)
     operator: Optional[str] = None
 
 @dataclass
@@ -186,7 +246,6 @@ class OrderData:
     np: str
     items: List[OrderItem]
 
-
 def render_order(order: OrderData) -> str:
     lines = []
     grand_total = 0
@@ -195,8 +254,6 @@ def render_order(order: OrderData) -> str:
     for it in order.items:
         c_norm = normalize_country(it.country)
         disp_base = DISPLAY.get(c_norm, it.country.strip().title())
-
-        # додаємо "(оператор X)" ТІЛЬКИ для Великобританії, якщо оператор заданий і валідний
         op = canonical_operator(getattr(it, "operator", None))
         op_suf = f" (оператор {op})" if (op and c_norm == "ВЕЛИКОБРИТАНІЯ") else ""
         disp = disp_base + op_suf
@@ -216,10 +273,16 @@ def render_order(order: OrderData) -> str:
             flag=flag, disp=disp, qty=it.qty, line_total=line_total_str
         ))
 
+    # Гарна шапка
+    full_name_fmt = format_full_name(order.full_name)
+    phone_fmt = format_phone(order.phone)
+    city_fmt = format_city(order.city)
+    np_fmt = format_np(order.np)
+
     header = (
-        f"{order.full_name} \n"
-        f"{order.phone}\n"
-        f"{order.city} № {order.np}  \n\n"
+        f"{full_name_fmt} \n"
+        f"{phone_fmt}\n"
+        f"{city_fmt} № {np_fmt}  \n\n"
     )
 
     body = "".join(lines) + "\n"
@@ -244,7 +307,7 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
             OrderItem(
                 country=i["country"],
                 qty=int(i["qty"]),
-                operator=i.get("operator")  # ← оператор приймаємо опціонально
+                operator=i.get("operator")
             )
             for i in data.get("items", [])
         ]
