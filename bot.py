@@ -35,7 +35,7 @@ ORDER_INFO_REQUEST = (
     "1. Ім'я та прізвище.\n"
     "2. Номер телефону.\n"
     "3. Місто та № відділення \"Нової Пошти\".\n"
-    "4. Країна(и) та кількість sim-карт."
+    "4. Країна(и) та кількість sim-карт (можна вказати оператора, наприклад, o2, Lebara, Vodafone для Англії)."
 )
 
 # ==== Прайси й мапи країн ====
@@ -53,6 +53,14 @@ PRICE_TIERS = {
     "КАЗАХСТАН":      [(10, 900), (4, 1000), (2, 1100), (1, 1200)],
     "МАРОККО":        [(10, 750), (4, 800), (2, 900), (1, 1000)],
     "США":            [(10, 1000), (4, 1300), (1, 1400)],
+}
+
+# Додаткові ціни для операторів у Великобританії (фіксовані приклади, можна розширити)
+OPERATOR_PRICES_UK = {
+    "o2": {5: 1500},  # Приклад: 1500 грн за 5 шт
+    "Lebara": {5: 1450},  # Приклад: 1450 грн за 5 шт
+    "Vodafone": {5: 1600},  # Приклад: 1600 грн за 5 шт
+    # Додай інші кількості чи оператори за потреби
 }
 
 FLAGS = {
@@ -100,6 +108,8 @@ COUNTRY_KEYWORDS = [
     "іспанія","чехія","польща","литва","латвія","казахстан","марокко","сша","usa","америка"
 ]
 
+OPERATOR_KEYWORDS = ["o2", "lebara", "vodafone"]
+
 def looks_like_order_intent(text: str) -> bool:
     t = (text or "").lower()
     return any(k in t for k in ORDER_INTENT_KEYWORDS)
@@ -121,7 +131,7 @@ def contains_any_required_field(text: str) -> tuple[bool, list]:
     if not has_np:
         missing.append("3. Місто та № відділення \"Нової Пошти\".")
     if not has_country_qty:
-        missing.append("4. Країна(и) та кількість sim-карт.")
+        missing.append("4. Країна(и) та кількість sim-карт (можна вказати оператора, наприклад, o2, Lebara, Vodafone для Англії).")
     return (has_phone or has_np or has_country_qty, missing)
 
 def normalize_country(name: str) -> str:
@@ -133,7 +143,17 @@ def normalize_country(name: str) -> str:
         return "США"
     return n
 
-def unit_price(country_norm: str, qty: int) -> Optional[int]:
+def extract_operator(text: str) -> Optional[str]:
+    t = (text or "").lower()
+    for op in OPERATOR_KEYWORDS:
+        if op.lower() in t:
+            return op
+    return None
+
+def unit_price(country_norm: str, qty: int, operator: Optional[str] = None) -> Optional[int]:
+    if country_norm == "ВЕЛИКОБРИТАНІЯ" and operator and operator.lower() in OPERATOR_PRICES_UK:
+        operator_prices = OPERATOR_PRICES_UK[operator.lower()]
+        return operator_prices.get(qty)  # Повертаємо фіксовану ціну для оператора, якщо є
     tiers = PRICE_TIERS.get(country_norm)
     if not tiers:
         return None
@@ -143,12 +163,13 @@ def unit_price(country_norm: str, qty: int) -> Optional[int]:
     return None
 
 # ==== Шаблони підсумку ====
-ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн  \n"
+ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн{operator_str}  \n"
 
 @dataclass
 class OrderItem:
     country: str
     qty: int
+    operator: Optional[str] = None
 
 @dataclass
 class OrderData:
@@ -167,18 +188,20 @@ def render_order(order: OrderData) -> str:
         c_norm = normalize_country(it.country)
         disp = DISPLAY.get(c_norm, it.country.strip().title())
         flag = FLAGS.get(c_norm, "")
-        price = unit_price(c_norm, it.qty)
+        operator = it.operator
+        price = unit_price(c_norm, it.qty, operator)
 
         if price is None:
             line_total_str = "договірна"
         else:
-            line_total = price * it.qty
+            line_total = price * it.qty if not operator else price  # Фіксована ціна для оператора
             grand_total += line_total
             counted_countries += 1
             line_total_str = str(line_total)
 
+        operator_str = f" (оператор {operator})" if operator else ""
         lines.append(ORDER_LINE.format(
-            flag=flag, disp=disp, qty=it.qty, line_total=line_total_str
+            flag=flag, disp=disp, qty=it.qty, line_total=line_total_str, operator_str=operator_str
         ))
 
     header = (
@@ -205,7 +228,13 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
         return None
     try:
         data = json.loads(m.group(0))
-        items = [OrderItem(country=i["country"], qty=int(i["qty"])) for i in data.get("items", [])]
+        items = [
+            OrderItem(
+                country=i["country"],
+                qty=int(i["qty"]),
+                operator=i.get("operator")  # Додаємо оператора, якщо є в JSON
+            ) for i in data.get("items", [])
+        ]
         return OrderData(
             full_name=data.get("full_name", "").strip(),
             phone=data.get("phone", "").strip(),
@@ -228,14 +257,14 @@ def build_system_prompt() -> str:
         "1. Ім'я та прізвище.\n"
         "2. Номер телефону.\n"
         "3. Місто та № відділення «Нової Пошти».\n"
-        "4. Країна(и) та кількість sim-карт.\n\n"
+        "4. Країна(и) та кількість sim-карт (можна вказати оператора, наприклад, o2, Lebara, Vodafone для Англії).\n\n"
 
         "Якщо бракує ДЕЯКИХ пунктів — відповідай СУВОРО в такому вигляді (без зайвого тексту до/після):\n"
         "📝 Залишилось вказати:\n"
         "\n"
         "<залиши лише відсутні рядки з їхніми номерами, напр.>\n"
         "2. Номер телефону.\n"
-        "4. Країна(и) та кількість sim-карт.\n\n"
+        "4. Країна(и) та кількість sim-карт (можна вказати оператора, наприклад, o2, Lebara, Vodafone для Англії).\n\n"
 
         "Коли ВСІ дані є — ВІДПОВІДАЙ ЛИШЕ JSON за схемою (без підсумку, без зайвого тексту):\n"
         "{\n"
@@ -243,7 +272,7 @@ def build_system_prompt() -> str:
         '  "phone": "0XX-XXXX-XXX",\n'
         '  "city": "Місто",\n'
         '  "np": "Номер відділення або поштомат",\n'
-        '  "items": [ {"country":"КРАЇНА","qty":N}, ... ]\n'
+        '  "items": [ {"country":"КРАЇНА","qty":N, "operator":"OPERATOR"}, ... ]\n'
         "}\n\n"
 
         "Після того, як ти віддаєш JSON, бекенд сам порахує ціни/суми та сформує підсумок у потрібному форматі. "
