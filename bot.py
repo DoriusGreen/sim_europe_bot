@@ -39,7 +39,6 @@ ORDER_INFO_REQUEST = (
 )
 
 # ==== Прайси й мапи країн ====
-# Сходинки: (мін.к-ть, ціна за 1). None = договірна
 PRICE_TIERS = {
     "ВЕЛИКОБРИТАНІЯ": [(1000, None), (100, 210), (20, 250), (10, 275), (4, 300), (2, 325), (1, 350)],
     "НІДЕРЛАНДИ":     [(20, 700), (4, 750), (1, 800)],
@@ -55,7 +54,6 @@ PRICE_TIERS = {
     "США":            [(10, 1000), (4, 1300), (1, 1400)],
 }
 
-# Додаткові ціни для операторів у Великобританії
 OPERATOR_PRICES_UK = {
     "o2": {5: 1500},
     "Lebara": {5: 1450},
@@ -94,10 +92,8 @@ DISPLAY = {
 
 # ==== Евристики наміру/даних ====
 ORDER_INTENT_KEYWORDS = [
-    # UA
     "замовити", "замовлення", "оформити", "оформлення",
     "потрібна", "потрібні", "потрібно", "візьму", "купити",
-    # RU
     "заказать", "заказ", "сделать заказ", "оформить", "оформление",
     "оформить заказ", "купить", "нужно", "нужна", "нужны", "возьму", "могу заказать"
 ]
@@ -115,11 +111,8 @@ def looks_like_order_intent(text: str) -> bool:
 
 def contains_any_required_field(text: str) -> tuple[bool, list]:
     t = (text or "").lower()
-    # телефон
     has_phone = bool(re.search(r'(\+?3?8?0?\D*\d{2}\D*\d{3,4}\D*\d{3,4})', t)) or bool(re.search(r'\b0\d{2}\D*\d{3,4}\D*\d{3,4}\b', t))
-    # відділення/поштомат
     has_np = ("поштомат" in t and re.search(r'\d{3,6}', t)) or ("№" in t and re.search(r'\d+', t)) or ("нової пошти" in t or "нова пошта" in t)
-    # країна + кількість
     has_country_word = any(k in t for k in COUNTRY_KEYWORDS)
     has_qty = bool(re.search(r'\d+', t))
     has_country_qty = has_country_word and has_qty
@@ -135,7 +128,6 @@ def contains_any_required_field(text: str) -> tuple[bool, list]:
 
 def normalize_country(name: str) -> str:
     n = (name or "").strip().upper()
-    # Синоніми
     if n in ("АНГЛІЯ", "UK", "UNITED KINGDOM", "ВБ", "GREAT BRITAIN"):
         return "ВЕЛИКОБРИТАНІЯ"
     if n in ("USA", "UNITED STATES", "ШТАТИ"):
@@ -328,16 +320,7 @@ def _save_last_order(ctx: ContextTypes.DEFAULT_TYPE, order: OrderData) -> None:
     }
 
 def _get_last_order(ctx: ContextTypes.DEFAULT_TYPE) -> Optional[OrderData]:
-    last_order_data = ctx.chat_data.get("last_order")
-    if last_order_data:
-        return OrderData(
-            full_name=last_order_data["full_name"],
-            phone=last_order_data["phone"],
-            city=last_order_data["city"],
-            np=last_order_data["np"],
-            items=[OrderItem(country=i["country"], qty=i["qty"], operator=i.get("operator")) for i in last_order_data["items"]]
-        )
-    return None
+    return ctx.chat_data.get("last_order")
 
 async def _ask_gpt(history: List[Dict[str, str]], user_message: str) -> str:
     messages = [{"role": "system", "content": build_system_prompt()}]
@@ -370,11 +353,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text.strip() if update.message and update.message.text else ""
     history = _ensure_history(context)
 
+    # Отримуємо попереднє замовлення
+    last_order = _get_last_order(context)
+
     # Перевірка наявності даних у поточному повідомленні
     has_fields, missing_fields = contains_any_required_field(user_message)
 
-    # Якщо є попереднє замовлення і намір нового — пропонуємо використати його
-    last_order = _get_last_order(context)
+    # Якщо є намір замовлення і є попереднє замовлення — пропонуємо використати його
     if looks_like_order_intent(user_message) and last_order and not has_fields:
         response = (
             f"Використано попередні дані: {last_order.full_name}, {last_order.phone}, {last_order.city} № {last_order.np}. "
@@ -387,7 +372,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Якщо намір замовлення і немає жодних полів — просимо все
-    if looks_like_order_intent(user_message) and not has_fields:
+    if looks_like_order_intent(user_message) and not has_fields and not last_order:
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": ORDER_INFO_REQUEST})
         _prune_history(history)
