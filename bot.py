@@ -321,7 +321,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Перевірка наявності даних у поточному повідомленні
     has_fields, missing_fields = contains_any_required_field(user_message)
 
-    # Якщо намір замовлення, але жодних полів немає — просимо все
+    # Якщо намір замовлення і немає жодних полів — просимо все
     if looks_like_order_intent(user_message) and not has_fields:
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": ORDER_INFO_REQUEST})
@@ -329,7 +329,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(ORDER_INFO_REQUEST)
         return
 
-    # Якщо є хоча б одне поле, але не всі — формуємо уточнення
+    # Якщо є хоча б одне поле і є відсутні — просимо тільки їх
     if has_fields and missing_fields:
         response = "📝 Залишилось вказати:\n\n" + "\n".join(missing_fields)
         history.append({"role": "user", "content": user_message})
@@ -338,7 +338,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(response)
         return
 
-    # Виклик до GPT з пам'яттю для інших випадків
+    # Виклик до GPT для інших випадків (наприклад, FAQ або уточнень)
     reply_text = await _ask_gpt(history, user_message)
 
     # Якщо модель віддала "просимо відсутні пункти", виправляємо заголовок на емодзі
