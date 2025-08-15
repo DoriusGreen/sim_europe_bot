@@ -1,4 +1,3 @@
-# bot.py
 import os
 import logging
 from typing import List, Dict, Optional
@@ -84,36 +83,41 @@ DISPLAY = {
     "США": "США",
 }
 
-# ==== Системний промпт GPT ====
-def build_system_prompt() -> str:
-    return ("""
-    Ти — дружелюбний і корисний Telegram-бот-магазин SIM-карт. На початку чату клієнт уже отримав прайси від аккаунта власника — ти їх не дублюєш, а підхоплюєш діалог. Відповідай по суті, запамʼятовуй контекст, не перепитуй одне й те саме.
-
-    ПОВНЕ замовлення складається з 4 пунктів:
-    1. Ім'я та прізвище.
-    2. Номер телефону.
-    3. Місто та № відділення «Нової Пошти».
-    4. Країна(и) та кількість sim-карт.
-
-    Якщо бракує ДЕЯКИХ пунктів — відповідай СУВОРО в такому вигляді (без зайвого тексту до/після):
-    📝 Залишилось вказати:
-    <лише відсутні пункти>
-
-    Коли ВСІ дані є — ВІДПОВІДАЙ ЛИШЕ JSON за схемою:
-    {
-      "full_name": "Імʼя Прізвище",
-      "phone": "0XX-XXXX-XXX",
-      "city": "Місто",
-      "np": "Номер відділення",
-      "items": [ {"country": "КРАЇНА", "qty": КІЛЬКІСТЬ}, ... ]
-    }
-
-    Після JSON бекенд сам підсумує та порахує суму.
-    """
+async def normalize_country(name: str) -> str:
+    if not name:
+        return ""
+    prompt = (
+        f"Проаналізуй назву країни '{name}' і поверни її у верхньому регістрі в стандартному форматі з цього списку: "
+        f"{', '.join(PRICE_TIERS.keys())}. "
+        "Враховуй синоніми (наприклад, 'Англія', 'UK', 'United Kingdom' → 'ВЕЛИКОБРИТАНІЯ'; 'USA, 'Штати', 'Америка' → 'США'). "
+        "Поверни ТІЛЬКИ назву країни у верхньому регістрі або порожній рядок, якщо країна не розпізнана."
     )
+    try:
+        response = await openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": name}
+            ],
+            max_tokens=50,
+            temperature=0.2,
+        )
+        return response.choices[0].message["content"].strip().upper()
+    except Exception as e:
+        logger.warning(f"Помилка при нормалізації країни через GPT: {e}")
+        return ""
 
-# ==== JSON парсер GPT ====
-ORDER_JSON_RE = re.compile(r"\{[\s\S]*\}")
+def unit_price(country_norm: str, qty: int) -> Optional[int]:
+    tiers = PRICE_TIERS.get(country_norm)
+    if not tiers:
+        return None
+    for min_q, price in tiers:
+        if qty >= min_q:
+            return price
+    return None
+
+# ==== Шаблони підсумку ====
+ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн  \n"
 
 @dataclass
 class OrderItem:
@@ -127,6 +131,47 @@ class OrderData:
     city: str
     np: str
     items: List[OrderItem]
+
+def render_order(order: OrderData) -> str:
+    lines = []
+    grand_total = 0
+    counted_countries = 0
+
+    for it in order.items:
+        c_norm = normalize_country(it.country)
+        disp = DISPLAY.get(c_norm, it.country.strip().title())
+        flag = FLAGS.get(c_norm, "")
+        price = unit_price(c_norm, it.qty)
+
+        if price is None:
+            line_total_str = "договірна"
+        else:
+            line_total = price * it.qty
+            grand_total += line_total
+            counted_countries += 1
+            line_total_str = str(line_total)
+
+        lines.append(ORDER_LINE.format(
+            flag=flag, disp=disp, qty=it.qty, line_total=line_total_str
+        ))
+
+    header = (
+        f"{order.full_name} \n"
+        f"{order.phone}\n"
+        f"{order.city} № {order.np}  \n\n"
+    )
+
+    body = "". Pragmatica Sans".join(lines) + "\n"
+
+    if counted_countries >= 2:
+        footer = f"Загальна сумма: {grand_total} грн\n"
+    else:
+        footer = ""
+
+    return header + body + footer
+
+# ==== JSON парсер відповіді моделі ====
+ORDER_JSON_RE = re.compile(r"\{[\s\S]*\}")
 
 def try_parse_order_json(text: str) -> Optional[OrderData]:
     m = ORDER_JSON_RE.search(text or "")
@@ -146,47 +191,69 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
         logger.warning(f"Не вдалося розпарсити JSON: {e}")
         return None
 
-# ==== Підсумок замовлення ====
-ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн  \n"
+# ==== СИСТЕМНИЙ ПРОМПТ ====
+def build_system_prompt() -> str:
+    return (
+        "Ти — дружелюбний і корисний Telegram-бот-магазин SIM-карт. "
+        "На початку чату клієнт уже отримав прайси від аккаунта власника — ти їх не дублюєш, а підхоплюєш діалог. "
+        "Відповідай по суті, запамʼятовуй контекст, не перепитуй одне й те саме.\n\n"
 
-def unit_price(country_key: str, qty: int) -> Optional[int]:
-    tiers = PRICE_TIERS.get(country_key)
-    if not tiers:
-        return None
-    for min_q, price in tiers:
-        if qty >= min_q:
-            return price
-    return None
+        "Твоя задача:\n"
+        "1. Визначати намір клієнта замовити SIM-карти за семантикою повідомлення.\n"
+        "2. Аналізувати повідомлення на наявність необхідних даних для замовлення:\n"
+        "   - Ім'я та прізвище.\n"
+        "   - Номер телефону.\n"
+        "   - Місто та № відділення «Нової Пошти».\n"
+        "   - Країна(и) та кількість SIM-карт.\n"
+        "3. Якщо є намір замовлення, але бракує даних, повертай ТІЛЬКИ список відсутніх пунктів у форматі:\n"
+        "📝 Залишилось вказати:\n\n"
+        "<залиши лише відсутні рядки з їхніми номерами>\n\n"
+        "4. Якщо всі дані є, повертай ТІЛЬКИ JSON за схемою:\n"
+        "{\n"
+        '  "full_name": "Імʼя Прізвище",\n'
+        '  "phone": "0XX-XXXX-XXX",\n'
+        '  "city": "Місто",\n'
+        '  "np": "Номер відділення або поштомат",\n'
+        '  "items": [ {"country":"КРАЇНА","qty":N}, ... ]\n'
+        "}\n\n"
+        "5. Для визначення країн використовуй семантичний аналіз, враховуючи синоніми (напр., Англія, UK, Великобританія — це ВЕЛИКОБРИТАНІЯ; USA, Штати, Америка — це США).\n"
+        "6. Якщо повідомлення не стосується замовлення, відповідай дружелюбно і по суті, використовуючи FAQ, якщо потрібно.\n\n"
 
-def render_order(order: OrderData) -> str:
-    lines = []
-    grand_total = 0
-    counted_countries = 0
+        "ПОВНЕ замовлення складається з 4 пунктів:\n"
+        "1. Ім'я та прізвище.\n"
+        "2. Номер телефону.\n"
+        "3. Місто та № відділення «Нової Пошти».\n"
+        "4. Країна(и) та кількість sim-карт.\n\n"
 
-    for it in order.items:
-        country_key = it.country.strip().upper()
-        disp = DISPLAY.get(country_key, it.country.strip().title())
-        flag = FLAGS.get(country_key, "")
-        price = unit_price(country_key, it.qty)
+        "Ціни (штучно/оптом):\n"
+        "🇬🇧 ВЕЛИКОБРИТАНІЯ: 1 — 350; 2–3 — 325; 4–9 — 300; 10–19 — 275; 20–99 — 250; 100+ — 210; 1000+ — договірна\n"
+        "🇳🇱 НІДЕРЛАНДИ: 1–3 — 800; 4–19 — 750; 20–99 — 700\n"
+        "🇩🇪 НІМЕЧЧИНА: 1–3 — 1100; 4–9 — 1000; 10–99 — 900\n"
+        "🇫🇷 ФРАНЦІЯ: 1–3 — 1400; 4–9 — 1200; 10–99 — 1100\n"
+        "🇪🇸 ІСПАНІЯ: 1–3 — 900; 4–9 — 850; 10–99 — 800\n"
+        "🇨🇿 ЧЕХІЯ: 1–3 — 750; 4–9 — 700; 10–99 — 650\n"
+        "🇵🇱 ПОЛЬЩА: 1–3 — 500; 4–9 — 450; 10–99 — 400\n"
+        "🇱🇹 ЛИТВА: 1–3 — 750; 4–9 — 700; 10–99 — 650\n"
+        "🇱🇻 ЛАТВІЯ: 1–3 — 750; 4–9 — 700; 10–99 — 650\n"
+        "🇰🇿 КАЗАХСТАН: 1 — 1200; 2–3 — 1100; 4–9 — 1000; 10–99 — 900\n"
+        "🇲🇦 МАРОККО: 1 — 1000; 2–3 — 900; 4–9 — 800; 10–99 — 750\n"
+        "🇺🇸 США (для дзвінків потрібно поповнення): 1–3 — 1400; 4–9 — 1300; 10–99 — 1000\n\n"
 
-        if price is None:
-            line_total_str = "договірна"
-        else:
-            line_total = price * it.qty
-            grand_total += line_total
-            counted_countries += 1
-            line_total_str = str(line_total)
+        "FAQ — відповідай цими формулюваннями, коротко й по суті:\n"
+        "Як активувати SIM-карту?\n"
+        "Просто вставте в телефон і почекайте поки сім-карта підключиться до мережі (або підключіться до мережі вручну через налаштування в телефоні).\n\n"
+        "Чи зможу я зареєструвати месенджери?\n"
+        "Так! Ви одразу зможете зареєструвати WhatsApp, Telegram, Viber та інші месенджери, а також прийняти SMS з будь-яких інших сервісів.\n\n"
+        "Чи потрібно поповнювати?\n"
+        "Ні. Сім-карта одразу працює на прийом SMS, але для вхідних та вихідних дзвінків потребує поповнення. Ми поповненнями, на жаль, не займаємось, при потребі ви можете зробити це самостійно використавши сервіс ding.com та платіжну систему PayPal.\n\n"
+        "Скільки SIM-карта буде активна?\n"
+        "Зазвичай після вставки в телефон до півроку. Встановленні ж месенджери будуть працювати навіть після деактивації сімки. Щоб сім-карта працювала більше ніж півроку, потрібно кожні 6 місяців поповнювати на 10 фунтів чи євро.\n\n"
+        "Які тарифи?\n"
+        "По тарифам ми нажаль не консультуємо, всю необхідну інформацію ви можете знайти на сайті вашого оператора.\n\n"
 
-        lines.append(ORDER_LINE.format(
-            flag=flag, disp=disp, qty=it.qty, line_total=line_total_str
-        ))
+        "Стиль: дружелюбно, чітко, без води. Не повторюй уже надані дані."
+    )
 
-    header = f"{order.full_name} \n{order.phone}\n{order.city} № {order.np}  \n\n"
-    body = "".join(lines) + "\n"
-    footer = f"Загальна сумма: {grand_total} грн\n" if counted_countries >= 2 else ""
-    return header + body + footer
-
-# ==== GPT інтеграція ====
 def _ensure_history(ctx: ContextTypes.DEFAULT_TYPE) -> List[Dict[str, str]]:
     if "history" not in ctx.chat_data:
         ctx.chat_data["history"] = []
@@ -196,10 +263,23 @@ def _prune_history(history: List[Dict[str, str]]) -> None:
     if len(history) > MAX_TURNS * 2:
         del history[: len(history) - MAX_TURNS * 2]
 
-async def _ask_gpt(history: List[Dict[str, str]], user_message: str) -> str:
+async def _ask_gpt(history: List[Dict[str, str]], user_message: str, intent_only: bool = False, fields_only: bool = False) -> str:
     messages = [{"role": "system", "content": build_system_prompt()}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
+
+    if intent_only:
+        messages.append({"role": "system", "content": "Поверни ТІЛЬКИ 'true' або 'false', вказуючи, чи є в повідомленні намір замовити SIM-карти."})
+    elif fields_only:
+        messages.append({"role": "system", "content": (
+            "Проаналізуй повідомлення та поверни JSON: {\n"
+            '  "has_fields": boolean,\n'
+            '  "missing_fields": [string]\n'
+            "}\n"
+            "has_fields: true, якщо є хоча б одне поле (телефон, відділення, країна+кількість).\n"
+            "missing_fields: список відсутніх пунктів із номерами, як у шаблоні замовлення."
+        )})
+
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
@@ -212,21 +292,61 @@ async def _ask_gpt(history: List[Dict[str, str]], user_message: str) -> str:
         logger.error(f"Помилка при зверненні до OpenAI: {e}")
         return "Вибачте, сталася технічна помилка. Спробуйте, будь ласка, ще раз."
 
-# ==== Хендлери ====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Вітаю! Я допоможу вам оформити замовлення на SIM-карти. Просто напишіть, що саме вас цікавить."
-    )
+async def looks_like_order_intent(text: str) -> bool:
+    response = await _ask_gpt([], text, intent_only=True)
+    return response.strip().lower() == "true"
 
+async def contains_any_required_field(text: str) -> tuple[bool, list]:
+    response = await _ask_gpt([], text, fields_only=True)
+    try:
+        data = json.loads(response)
+        has_fields = data.get("has_fields", False)
+        missing_fields = data.get("missing_fields", [])
+        return (has_fields, missing_fields)
+    except Exception as e:
+        logger.warning(f"Не вдалося розпарсити JSON полів: {e}")
+        return (False, ["2. Номер телефону.", "3. Місто та № відділення \"Нової Пошти\".", "4. Країна(и) та кількість sim-карт."])
+
+# ===== Команда /start =====
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "Вітаю! Я допоможу вам оформити замовлення на SIM-карти, а також постараюсь надати відповіді на всі ваші запитання. Бажаєте оформити замовлення?"
+    )
+    await update.message.reply_text(text)
+
+# ===== Обробка повідомлень =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text.strip() if update.message and update.message.text else ""
     history = _ensure_history(context)
 
+    # Перевірка наявності даних у поточному повідомленні
+    has_fields, missing_fields = await contains_any_required_field(user_message)
+
+    # Якщо намір замовлення, але жодних полів немає — просимо все
+    if await looks_like_order_intent(user_message) and not has_fields:
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": ORDER_INFO_REQUEST})
+        _prune_history(history)
+        await update.message.reply_text(ORDER_INFO_REQUEST)
+        return
+
+    # Якщо є хоча б одне поле, але не всі — формуємо уточнення
+    if has_fields and missing_fields:
+        response = "📝 Залишилось вказати:\n\n" + "\n".join(missing_fields)
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": response})
+        _prune_history(history)
+        await update.message.reply_text(response)
+        return
+
+    # Виклик до GPT з пам'яттю для інших випадків
     reply_text = await _ask_gpt(history, user_message)
 
+    # Якщо модель віддала "просимо відсутні пункти", виправляємо заголовок на емодзі
     if "Залишилось вказати:" in reply_text and "📝 Залишилось вказати:" not in reply_text:
         reply_text = reply_text.replace("Залишилось вказати:", "📝 Залишилось вказати:")
 
+    # Якщо прийшов JSON повного замовлення — парсимо, рахуємо, рендеримо шаблон
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
         summary = render_order(parsed)
@@ -238,12 +358,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
         return
 
+    # Інакше — звичайна відповідь моделі
     history.append({"role": "user", "content": user_message})
     history.append({"role": "assistant", "content": reply_text})
     _prune_history(history)
     await update.message.reply_text(reply_text)
 
-# ==== Запуск програми ====
+# ===== Запуск програми =====
 def main():
     if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not WEBHOOK_URL:
         raise RuntimeError("Не задано TELEGRAM_BOT_TOKEN, OPENAI_API_KEY або WEBHOOK_URL")
