@@ -1,0 +1,153 @@
+[
+  {
+    "id": "gb-sim",
+    "name": "SIM Велика Британія (UK)",
+    "type": "sim",
+    "country": "GB",
+    "tiers": [
+      {"min_qty": 1, "price": 350},
+      {"min_qty": 2, "price": 325},
+      {"min_qty": 4, "price": 300},
+      {"min_qty": 10, "price": 275},
+      {"min_qty": 20, "price": 250},
+      {"min_qty": 100, "price": 210},
+      {"min_qty": 1000, "price": null, "negotiable": true}
+    ],
+    "tags": ["великобританія","велика британія","британія","англія","uk","england","sim"]
+  },
+  {
+    "id": "nl-sim",
+    "name": "SIM Нідерланди (NL)",
+    "type": "sim",
+    "country": "NL",
+    "tiers": [
+      {"min_qty": 1, "price": 800},
+      {"min_qty": 4, "price": 750},
+      {"min_qty": 20, "price": 700}
+    ],
+    "tags": ["нідерланди","голландія","nl","netherlands","holland","sim"]
+  },
+  {
+    "id": "de-sim",
+    "name": "SIM Німеччина (DE)",
+    "type": "sim",
+    "country": "DE",
+    "tiers": [
+      {"min_qty": 1, "price": 1100},
+      {"min_qty": 4, "price": 1000},
+      {"min_qty": 10, "price": 900}
+    ],
+    "tags": ["німеччина","німечина","германія","de","germany","sim"]
+  },
+  {
+    "id": "fr-sim",
+    "name": "SIM Франція (FR)",
+    "type": "sim",
+    "country": "FR",
+    "tiers": [
+      {"min_qty": 1, "price": 1400},
+      {"min_qty": 4, "price": 1200},
+      {"min_qty": 10, "price": 1100}
+    ],
+    "tags": ["франція","fr","france","сим","sim"]
+  },
+  {
+    "id": "es-sim",
+    "name": "SIM Іспанія (ES)",
+    "type": "sim",
+    "country": "ES",
+    "tiers": [
+      {"min_qty": 1, "price": 900},
+      {"min_qty": 4, "price": 850},
+      {"min_qty": 10, "price": 800}
+    ],
+    "tags": ["іспанія","es","spain","sim"]
+  },
+  {
+    "id": "cz-sim",
+    "name": "SIM Чехія (CZ)",
+    "type": "sim",
+    "country": "CZ",
+    "tiers": [
+      {"min_qty": 1, "price": 750},
+      {"min_qty": 4, "price": 700},
+      {"min_qty": 10, "price": 650}
+    ],
+    "tags": ["чехія","cz","czech","czechia","sim"]
+  },
+  {
+    "id": "pl-sim",
+    "name": "SIM Польща (PL)",
+    "type": "sim",
+    "country": "PL",
+    "tiers": [
+      {"min_qty": 1, "price": 500},
+      {"min_qty": 4, "price": 450},
+      {"min_qty": 10, "price": 400}
+    ],
+    "tags": ["польща","pl","poland","sim"]
+  },
+  {
+    "id": "lt-sim",
+    "name": "SIM Литва (LT)",
+    "type": "sim",
+    "country": "LT",
+    "tiers": [
+      {"min_qty": 1, "price": 750},
+      {"min_qty": 4, "price": 700},
+      {"min_qty": 10, "price": 650}
+    ],
+    "tags": ["литва","lt","lithuania","sim"]
+  },
+  {
+    "id": "lv-sim",
+    "name": "SIM Латвія (LV)",
+    "type": "sim",
+    "country": "LV",
+    "tiers": [
+      {"min_qty": 1, "price": 750},
+      {"min_qty": 4, "price": 700},
+      {"min_qty": 10, "price": 650}
+    ],
+    "tags": ["латвія","lv","latvia","sim"]
+  },
+  {
+    "id": "kz-sim",
+    "name": "SIM Казахстан (KZ)",
+    "type": "sim",
+    "country": "KZ",
+    "tiers": [
+      {"min_qty": 1, "price": 1200},
+      {"min_qty": 2, "price": 1100},
+      {"min_qty": 4, "price": 1000},
+      {"min_qty": 10, "price": 900}
+    ],
+    "tags": ["казахстан","kz","kazakhstan","sim"]
+  },
+  {
+    "id": "ma-sim",
+    "name": "SIM Марокко (MA)",
+    "type": "sim",
+    "country": "MA",
+    "tiers": [
+      {"min_qty": 1, "price": 1000},
+      {"min_qty": 2, "price": 900},
+      {"min_qty": 4, "price": 800},
+      {"min_qty": 10, "price": 750}
+    ],
+    "tags": ["марокко","ma","morocco","sim"]
+  },
+  {
+    "id": "us-sim",
+    "name": "SIM США (US)",
+    "type": "sim",
+    "country": "US",
+    "tiers": [
+      {"min_qty": 1, "price": 1400},
+      {"min_qty": 4, "price": 1300},
+      {"min_qty": 10, "price": 1000}
+    ],
+    "tags": ["сша","штати","us","usa","america","сим","sim"],
+    "notes": "Потребують поповнення для активації"
+  }
+]
