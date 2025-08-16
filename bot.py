@@ -511,7 +511,6 @@ QTY_ONLY_RE = re.compile(
     r"(?:\bпо\b\s*)?(\d{1,4})\s*(шт|штук|шт\.?|сим(?:-?карт[аи])?|sim-?card|sim|pieces?)\b",
     re.IGNORECASE
 )
-
 def detect_qty_only(text: str) -> Optional[int]:
     if not text:
         return None
@@ -522,6 +521,83 @@ def detect_qty_only(text: str) -> Optional[int]:
         return int(m.group(1))
     except Exception:
         return None
+
+# ==== НОВЕ: евристика «в самому тексті є і країни, і кількості» (п.4) ====
+COUNTRY_KEYWORDS: Dict[str, List[str]] = {
+    "ВЕЛИКОБРИТАНІЯ": ["англ", "британ", "великобритан", "uk", "u.k", "great britain", "+44"],
+    "ФРАНЦІЯ": ["франц", "france", "+33"],
+    "ІСПАНІЯ": ["іспан", "испан", "spain", "+34"],
+    "НІМЕЧЧИНА": ["німеч", "герман", "german", "+49", "deutsch"],
+    "НІДЕРЛАНДИ": ["нідерлан", "голланд", "holland", "nether", "+31"],
+    "ІТАЛІЯ": ["італ", "итал", "ital", "+39"],
+    "ЧЕХІЯ": ["чех", "czech", "+420"],
+    "ПОЛЬЩА": ["польщ", "польш", "poland"],
+    "ЛИТВА": ["литв", "lithuan"],
+    "ЛАТВІЯ": ["латв", "latvia"],
+    "КАЗАХСТАН": ["казах", "kazakh", "+7"],
+    "МАРОККО": ["марок", "morocc"],
+    "США": ["сша", "usa", "америк", "штат", "+1"],
+}
+
+def _country_mentions_with_pos(text: str) -> List[Tuple[str, int]]:
+    low = (text or "").lower()
+    found: List[Tuple[str, int]] = []
+    for key, subs in COUNTRY_KEYWORDS.items():
+        best = None
+        for s in subs:
+            i = low.find(s)
+            if i != -1:
+                best = i if best is None else min(best, i)
+        if best is not None:
+            found.append((key, best))
+    found.sort(key=lambda x: x[1])
+    return found
+
+NUM_POS_RE = re.compile(r"\d{1,4}")
+PO_QTY_RE = re.compile(r"\bпо\s*(\d{1,4})\b", re.IGNORECASE)
+
+def detect_point4_items(text: str) -> List[Tuple[str, int]]:
+    """Повертає список (CANON_COUNTRY, qty), якщо в одному повідомленні видно і країни, і кількості."""
+    if not text:
+        return []
+    lows = text.lower()
+    mentions = _country_mentions_with_pos(text)
+    if not mentions:
+        return []
+
+    # 1) Пошук пар «число поруч із країною» (найближче число в ±20 символів)
+    nums = [(m.group(0), m.start()) for m in NUM_POS_RE.finditer(text)]
+    items: List[Tuple[str, int]] = []
+    used_num_idx: Set[int] = set()
+    used_country_idx: Set[int] = set()
+
+    for ci, (country, cpos) in enumerate(mentions):
+        best_idx = None
+        best_dist = 9999
+        for ni, (nstr, npos) in enumerate(nums):
+            if ni in used_num_idx:
+                continue
+            dist = abs(npos - cpos)
+            if dist <= 20 and dist < best_dist:  # близько
+                best_dist = dist
+                best_idx = ni
+        if best_idx is not None:
+            qty = int(nums[best_idx][0])
+            items.append((country, qty))
+            used_num_idx.add(best_idx)
+            used_country_idx.add(ci)
+
+    # 2) Якщо є «по 10» та згадки кількох країн — застосувати одне число до всіх, що лишилися
+    if len(items) == 0 or len(items) < len(mentions):
+        m = PO_QTY_RE.search(text)
+        if m:
+            q = int(m.group(1))
+            for ci, (country, _) in enumerate(mentions):
+                if ci not in used_country_idx:
+                    items.append((country, q))
+
+    # 3) Якщо знайшли хоч одну пару — це наш пункт 4
+    return items
 
 # ==== СИСТЕМНІ ПРОМПТИ ====
 def build_system_prompt() -> str:
@@ -787,7 +863,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + quoted_text
         )
 
-    # === НОВЕ: якщо написали тільки кількість, а перед цим показували прайс — підкажемо країни ===
+    # === КЕЙС 1: тільки кількість після прайсу (було раніше) ===
     last_price_countries: Optional[List[str]] = context.chat_data.get("last_price_countries")
     qty_only = detect_qty_only(raw_user_message)
     if qty_only and last_price_countries:
@@ -797,18 +873,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Застосуй її до кожної з останніх країн, для яких щойно показували прайс: {hint_countries}. "
             f"Це відповідає пункту 4 (країна/кількість).]"
         )
-        # вважаємо, що п.4 вже є, чекаємо 1–3
         context.chat_data["awaiting_missing"] = {1, 2, 3}
         context.chat_data["point4_hint"] = {"qty": qty_only, "countries": last_price_countries, "ts": time.time()}
+
+    # === КЕЙС 2: у повідомленні одночасно є країни+кількості (НОВЕ) ===
+    p4_items = detect_point4_items(raw_user_message)
+    if p4_items:
+        pairs_text = "; ".join(f"{DISPLAY.get(c, c.title())} — {q}" for c, q in p4_items)
+        user_payload += (
+            f"\n\n[ПІДСКАЗКА ДЛЯ ПАРСИНГУ: пункт 4 уже заданий у цьому повідомленні: {pairs_text}. "
+            f"Склей це з пунктами 1–3 з контексту та поверни ПОВНИЙ JSON.]"
+        )
+        context.chat_data["awaiting_missing"] = {1, 2, 3}
+        context.chat_data["point4_hint"] = {"items": p4_items, "ts": time.time()}
 
     # Якщо ми вже чекаємо 1–3 і є підказка за п.4 — дублюємо її в payload, щоб GPT точно склеїв
     if context.chat_data.get("awaiting_missing") == {1, 2, 3} and context.chat_data.get("point4_hint"):
         h = context.chat_data["point4_hint"]
-        hc = ", ".join(h["countries"])
-        user_payload += (
-            f"\n\n[НАГАДУВАННЯ ДЛЯ ПАРСИНГУ: пункт 4 вже відомий: {hc} — по {h['qty']} шт. "
-            f"Додай/склей з наданими нижче пунктами 1–3.]"
-        )
+        if "qty" in h and "countries" in h:
+            hc = ", ".join(h["countries"])
+            user_payload += (
+                f"\n\n[НАГАДУВАННЯ ДЛЯ ПАРСИНГУ: пункт 4 вже відомий: {hc} — по {h['qty']} шт. "
+                f"Додай/склей із пунктами 1–3.]"
+            )
+        elif "items" in h:
+            pairs_text = "; ".join(f"{DISPLAY.get(c, c.title())} — {q}" for c, q in h["items"])
+            user_payload += (
+                f"\n\n[НАГАДУВАННЯ ДЛЯ ПАРСИНГУ: пункт 4 вже відомий: {pairs_text}. "
+                f"Додай/склей із пунктами 1–3.]"
+            )
 
     # Якщо до цього бракувало САМЕ п.4 — пробуємо force-point4
     awaiting = context.chat_data.get("awaiting_missing")
@@ -955,7 +1048,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif missing:
         context.chat_data["awaiting_missing"] = missing
     else:
-        # якщо ми вже підсунули п.4 через qty-only — лишаємо {1,2,3}; інакше очищаємо
         if context.chat_data.get("awaiting_missing") != {1, 2, 3}:
             context.chat_data.pop("awaiting_missing", None)
 
