@@ -1,4 +1,3 @@
-# bot.py
 import os
 import time
 import logging
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", "8443"))
+ORDER_GROUP_CHAT_ID = "-1004832242322"  # ID групи для надсилання замовлень
 
 openai.api_key = OPENAI_API_KEY
 
@@ -917,6 +916,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await msg.reply_text(summary)
             await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
+            
+            # Надсилання замовлення до групи
+            if ORDER_GROUP_CHAT_ID:
+                try:
+                    await context.bot.send_message(
+                        chat_id=ORDER_GROUP_CHAT_ID,
+                        text=summary,
+                        parse_mode="MarkdownV2"
+                    )
+                except Exception as e:
+                    logger.error(f"Помилка при надсиланні замовлення до групи {ORDER_GROUP_CHAT_ID}: {e}")
+
             return
         # якщо не вийшло — ідемо звичайним шляхом
 
@@ -961,6 +972,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await msg.reply_text(summary)
         await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
+
+        # Надсилання замовлення до групи
+        if ORDER_GROUP_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ORDER_GROUP_CHAT_ID,
+                    text=summary,
+                    parse_mode="MarkdownV2"
+                )
+            except Exception as e:
+                logger.error(f"Помилка при надсиланні замовлення до групи {ORDER_GROUP_CHAT_ID}: {e}")
+
         return
 
     # 3) Режим цін/наявності
