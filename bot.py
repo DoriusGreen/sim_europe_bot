@@ -30,7 +30,7 @@ openai.api_key = OPENAI_API_KEY
 MAX_TURNS = 14
 ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
 
-# ==== КУДА ДУБУЮ Є ЗАМОВЛЕННЯ (ГРУПА) ====
+# ==== Куди дублюємо замовлення (ID групи) ====
 ORDER_FORWARD_CHAT_ID = int(os.getenv("ORDER_FORWARD_CHAT_ID", "-4832242322"))
 
 # ==== Ігнор/врахування повідомлень менеджера ====
@@ -79,36 +79,38 @@ def _is_manager_message(msg: Message) -> bool:
         return True
     return False
 
-# ====== ДОПОМОЖНІ: відкладене надсилання підсумку в групу ======
-FORWARD_DELAY_SEC = 180  # 3 хвилини
+# ===== Відкладене надсилання у групу =====
+FORWARD_DELAY_SEC = 60  # <-- 60 секунд
 
 async def _forward_job_callback(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """JobQueue callback: відправити підсумок у групу, якщо він ще актуальний."""
     data = ctx.job.data or {}
     summary = data.get("summary")
     if not summary:
+        logger.info("forward_job: немає summary у job.data")
         return
     try:
+        logger.info("forward_job: надсилаю замовлення у групу %s", ORDER_FORWARD_CHAT_ID)
         await ctx.bot.send_message(chat_id=ORDER_FORWARD_CHAT_ID, text=summary)
     except Exception as e:
         logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
-    # прибираємо позначки про заплановане надсилання для цього чату
+    # приберемо мітки про заплановане відправлення
     ctx.chat_data.pop("pending_forward_job", None)
     ctx.chat_data.pop("pending_forward_summary", None)
     ctx.chat_data.pop("pending_forward_created_at", None)
 
 def _cancel_pending_forward(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Скасувати попереднє заплановане відправлення, якщо було."""
     job = context.chat_data.pop("pending_forward_job", None)
     if job:
         try:
+            logger.info("forward_job: скасовую попередню джобу")
             job.schedule_removal()
         except Exception:
             pass
 
 def _schedule_forward(context: ContextTypes.DEFAULT_TYPE, chat_id: int, summary: str) -> None:
-    """Запланувати відправлення підсумку в групу через FORWARD_DELAY_SEC.
-       Якщо вже було заплановано — скасувати і поставити заново (надсилатиметься остання версія)."""
+    """Ставимо відправку у групу через FORWARD_DELAY_SEC.
+       Переплануємо лише при новому підсумку (старе завдання скасовуємо)."""
     _cancel_pending_forward(context)
     job = context.application.job_queue.run_once(
         _forward_job_callback,
@@ -120,6 +122,7 @@ def _schedule_forward(context: ContextTypes.DEFAULT_TYPE, chat_id: int, summary:
     context.chat_data["pending_forward_job"] = job
     context.chat_data["pending_forward_summary"] = summary
     context.chat_data["pending_forward_created_at"] = time.time()
+    logger.info("forward_job: заплановано через %s сек", FORWARD_DELAY_SEC)
 
 # ==== Стандартні повідомлення ====
 ORDER_INFO_REQUEST = (
@@ -130,7 +133,7 @@ ORDER_INFO_REQUEST = (
     "4. Країна(и) та кількість sim-карт."
 )
 
-# ==== Прайси й мапи країн (ДОСТУПНІ ТІЛЬКИ ЦІ) ====
+# ==== Прайси й мапи країн (доступні ТІЛЬКИ ці) ====
 PRICE_TIERS = {
     "ВЕЛИКОБРИТАНІЯ": [(1000, None), (100, 210), (20, 250), (10, 275), (4, 300), (2, 325), (1, 350)],
     "НІДЕРЛАНДИ":     [(20, 700), (4, 750), (1, 800)],
@@ -229,6 +232,10 @@ def canonical_operator_any(op: Optional[str]) -> Optional[str]:
         "Lycamobile": ["lycamobile","lyca","lyka","лайкамобайл","лайка"],
         "T-mobile": ["t-mobile","t mobile","т-мобайл","т мобайл","tmobile","tмобайл"],
         "Kaktus": ["kaktus","кактус"],
+        "Play": ["play"],
+        "Tele2": ["tele2","теле2"],
+        "Labas": ["labas"],
+        "Orange": ["orange"],
     }
     for canon, alts in mapping.items():
         if o in alts:
@@ -496,7 +503,7 @@ def contains_us_activation_block(text: str) -> bool:
     t = (text or "").lower()
     return ("lycamobile.us/en/activate-sim" in t) or ("як активувати та поповнити сім-карту сша" in t)
 
-# ==== ДОВІДНИК USSD КОМБІНАЦІЙ ====
+# ==== Довідник USSD ====
 USSD_DATA: Dict[str, List[Tuple[Optional[str], str]]] = {
     "ВЕЛИКОБРИТАНІЯ": [("Vodafone", "*#100#"), ("Lebara", "*#100#"), ("O2", "комбінації немає, номер вказаний на упаковці.")],
     "ІСПАНІЯ": [("Lebara", "*321#"), ("Movistar", "*133#"), ("Lycamobile", "*321#")],
@@ -605,12 +612,10 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
     """Повертає список (CANON_COUNTRY, qty), якщо в одному повідомленні видно і країни, і кількості."""
     if not text:
         return []
-    lows = text.lower()
     mentions = _country_mentions_with_pos(text)
     if not mentions:
         return []
 
-    # 1) Пошук пар «число поруч із країною» (найближче число в ±20 символів)
     nums = [(m.group(0), m.start()) for m in NUM_POS_RE.finditer(text)]
     items: List[Tuple[str, int]] = []
     used_num_idx: Set[int] = set()
@@ -623,7 +628,7 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
             if ni in used_num_idx:
                 continue
             dist = abs(npos - cpos)
-            if dist <= 20 and dist < best_dist:  # близько
+            if dist <= 20 and dist < best_dist:
                 best_dist = dist
                 best_idx = ni
         if best_idx is not None:
@@ -632,7 +637,6 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
             used_num_idx.add(best_idx)
             used_country_idx.add(ci)
 
-    # 2) Якщо є «по 10» та згадки кількох країн — застосувати одне число до всіх, що лишилися
     if len(items) == 0 or len(items) < len(mentions):
         m = PO_QTY_RE.search(text)
         if m:
@@ -641,7 +645,6 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
                 if ci not in used_country_idx:
                     items.append((country, q))
 
-    # 3) Якщо знайшли хоч одну пару — це наш пункт 4
     return items
 
 # ==== СИСТЕМНІ ПРОМПТИ ====
@@ -661,6 +664,20 @@ def build_system_prompt() -> str:
         "2. Номер телефону.\n"
         "3. Місто та № відділення «Нової Пошти».\n"
         "4. Країна(и) та кількість sim-карт.\n\n"
+
+        # === ОПЕРАТОРИ В НАЯВНОСТІ (відповідай тільки якщо питають про операторів) ===
+        "Інформація про операторів у наявності:\n"
+        "• Нідерланди — Lebara\n"
+        "• Німеччина — Lebara\n"
+        "• Іспанія — Lebara\n"
+        "• Польща — зазвичай Play (краще уточнити у менеджера)\n"
+        "• Чехія — Kaktus або T-Mobile\n"
+        "• США — Lycamobile\n"
+        "• Казахстан — Tele2\n"
+        "• Литва — Labas\n"
+        "• Франція — Lebara\n"
+        "• Марокко — Orange\n"
+        "Не пропонуй операторів самостійно; відповідай про них лише якщо клієнт запитує.\n\n"
 
         # === ЯК ПИТАТИ ПРО НЕСТАЧУ ДАНИХ ===
         "Пункт 4 може бути у довільній формі/порядку («Англія 2 шт», «дві UK», «UK x2» тощо). "
@@ -918,7 +935,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + quoted_text
         )
 
-    # === КЕЙС 1: тільки кількість після прайсу (було раніше) ===
+    # === КЕЙС 1: тільки кількість після прайсу ===
     last_price_countries: Optional[List[str]] = context.chat_data.get("last_price_countries")
     qty_only = detect_qty_only(raw_user_message)
     if qty_only and last_price_countries:
@@ -931,7 +948,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data["awaiting_missing"] = {1, 2, 3}
         context.chat_data["point4_hint"] = {"qty": qty_only, "countries": last_price_countries, "ts": time.time()}
 
-    # === КЕЙС 2: у повідомленні одночасно є країни+кількості (НОВЕ) ===
+    # === КЕЙС 2: у повідомленні одночасно є країни+кількості ===
     p4_items = detect_point4_items(raw_user_message)
     if p4_items:
         pairs_text = "; ".join(f"{DISPLAY.get(c, c.title())} — {q}" for c, q in p4_items)
@@ -942,7 +959,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data["awaiting_missing"] = {1, 2, 3}
         context.chat_data["point4_hint"] = {"items": p4_items, "ts": time.time()}
 
-    # Якщо ми вже чекаємо 1–3 і є підказка за п.4 — дублюємо її в payload, щоб GPT точно склеїв
+    # Якщо вже чекаємо 1–3 і є підказка за п.4 — дублюємо її
     if context.chat_data.get("awaiting_missing") == {1, 2, 3} and context.chat_data.get("point4_hint"):
         h = context.chat_data["point4_hint"]
         if "qty" in h and "countries" in h:
@@ -978,10 +995,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(summary)
             await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
 
-            # ---> ВІДКЛАДЕНЕ НАДСИЛАННЯ В ГРУПУ (3 хв)
+            # ВІДКЛАДЕНЕ НАДСИЛАННЯ В ГРУПУ (60 сек)
             _schedule_forward(context, msg.chat_id, summary)
             return
-        # якщо не вийшло — ідемо звичайним шляхом
 
     # 1) Основний виклик GPT
     reply_text = await _ask_gpt_main(history, user_payload)
@@ -990,7 +1006,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "Залишилось вказати:" in reply_text and "📝 Залишилось вказати:" not in reply_text:
         reply_text = reply_text.replace("Залишилось вказати:", "📝 Залишилось вказати:")
 
-    # Якщо GPT все одно повернув повний чек-лист, а ми вже дали п.4 — скоригуємо підказку для користувача
+    # Якщо GPT все одно повернув повний чек-лист, а ми вже дали п.4 — скоригуємо
     if reply_text.strip().startswith("🛒 Для оформлення замовлення") and context.chat_data.get("awaiting_missing") == {1, 2, 3}:
         reply_text = (
             "📝 Залишилось вказати:\n\n"
@@ -1025,7 +1041,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(summary)
         await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
 
-        # ---> ВІДКЛАДЕНЕ НАДСИЛАННЯ В ГРУПУ (3 хв)
+        # ВІДКЛАДЕНЕ НАДСИЛАННЯ В ГРУПУ (60 сек)
         _schedule_forward(context, msg.chat_id, summary)
         return
 
@@ -1038,7 +1054,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         invalid = [price_countries[i] for i, k in enumerate(normalized)
                    if k not in PRICE_TIERS and str(price_countries[i]).upper() != "ALL"]
 
-        # ЗАПАМ’ЯТОВУЄМО, ДЛЯ ЯКИХ КРАЇН ПОКАЗАЛИ ПРАЙС
+        # запам’ятовуємо, для яких країн показали прайс (для "по 10")
         if want_all:
             context.chat_data["last_price_countries"] = list(PRICE_TIERS.keys())
         else:
@@ -1084,7 +1100,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(formatted)
             return
 
-        # 2) Будь-які інші код-блоки/JSON — ігноруємо (рахувати «в голові» можна, але не друкувати)
+        # 2) Будь-які інші код-блоки/JSON — ігноруємо
         if _looks_like_code_or_json(follow):
             follow = ""
 
@@ -1110,7 +1126,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(formatted)
         return
 
-    # 5) Якщо GPT сказав, що бракує ЛИШЕ пункту 4 — запам’ятовуємо стан для наступного повідомлення
+    # 5) Якщо GPT сказав, що бракує ЛИШЕ пункту 4 — запам’ятовуємо стан
     missing = missing_points_from_reply(reply_text)
     if missing == {4}:
         context.chat_data["awaiting_missing"] = {4}
