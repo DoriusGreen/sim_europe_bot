@@ -30,6 +30,55 @@ openai.api_key = OPENAI_API_KEY
 MAX_TURNS = 14
 ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
 
+# ==== «Режим оператора» (ігнор повідомлень менеджерів) ====
+def _parse_ids(env: Optional[str]) -> Set[int]:
+    out: Set[int] = set()
+    if not env:
+        return out
+    for x in env.split(","):
+        x = x.strip()
+        if not x:
+            continue
+        try:
+            out.add(int(x))
+        except ValueError:
+            pass
+    return out
+
+def _parse_usernames(env: Optional[str]) -> Set[str]:
+    out: Set[str] = set()
+    if not env:
+        return out
+    for x in env.split(","):
+        x = x.strip().lstrip("@").lower()
+        if x:
+            out.add(x)
+    return out
+
+# --- за замовчуванням додаємо твій нік, щоб бот ніколи не відповідав на твої авто-повідомлення
+DEFAULT_OWNER_USERNAME = os.getenv("OWNER_USERNAME", "Sim_Card_Three")
+DEFAULT_OWNER_USER_ID = os.getenv("OWNER_USER_ID", "")
+
+MANAGER_USER_IDS = _parse_ids(os.getenv("MANAGER_USER_IDS"))
+if DEFAULT_OWNER_USER_ID:
+    MANAGER_USER_IDS |= _parse_ids(DEFAULT_OWNER_USER_ID)
+
+MANAGER_USERNAMES = _parse_usernames(os.getenv("MANAGER_USERNAMES"))
+if DEFAULT_OWNER_USERNAME:
+    MANAGER_USERNAMES.add(DEFAULT_OWNER_USERNAME.strip().lstrip("@").lower())
+
+MANUAL_SILENCE_SEC = int(os.getenv("MANUAL_SILENCE_SEC", "180"))
+
+def _is_manager_message(msg: Message) -> bool:
+    u = msg.from_user
+    if not u:
+        return False
+    if MANAGER_USER_IDS and u.id in MANAGER_USER_IDS:
+        return True
+    if MANAGER_USERNAMES and u.username and u.username.lower() in MANAGER_USERNAMES:
+        return True
+    return False
+
 # ==== Стандартні повідомлення ====
 ORDER_INFO_REQUEST = (
     "🛒 Для оформлення замовлення напишіть:\n\n"
@@ -58,7 +107,7 @@ FLAGS = {
     "ВЕЛИКОБРИТАНІЯ": "🇬🇧", "НІДЕРЛАНДИ": "🇳🇱", "НІМЕЧЧИНА": "🇩🇪",
     "ФРАНЦІЯ": "🇫🇷", "ІСПАНІЯ": "🇪🇸", "ЧЕХІЯ": "🇨🇿", "ПОЛЬЩА": "🇵🇱",
     "ЛИТВА": "🇱🇹", "ЛАТВІЯ": "🇱🇻", "КАЗАХСТАН": "🇰🇿", "МАРОККО": "🇲🇦", "США": "🇺🇸",
-    # нижче — тільки для USSD-відповідей (не впливає на прайс/наявність)
+    # для USSD (довідки)
     "ІТАЛІЯ": "🇮🇹",
     "МОЛДОВА": "🇲🇩",
 }
@@ -72,16 +121,9 @@ DISPLAY = {
     "МОЛДОВА": "Молдова",
 }
 DIAL_CODES = {
-    "ВЕЛИКОБРИТАНІЯ": "+44",
-    "ІСПАНІЯ": "+34",
-    "ФРАНЦІЯ": "+33",
-    "НІМЕЧЧИНА": "+49",
-    "НІДЕРЛАНДИ": "+31",
-    "ІТАЛІЯ": "+39",
-    "ЧЕХІЯ": "+420",
-    "МОЛДОВА": "+373",
-    "КАЗАХСТАН": "+7",
-    "США": "+1",
+    "ВЕЛИКОБРИТАНІЯ": "+44", "ІСПАНІЯ": "+34", "ФРАНЦІЯ": "+33", "НІМЕЧЧИНА": "+49",
+    "НІДЕРЛАНДИ": "+31", "ІТАЛІЯ": "+39", "ЧЕХІЯ": "+420", "МОЛДОВА": "+373",
+    "КАЗАХСТАН": "+7", "США": "+1",
 }
 
 def normalize_country(name: str) -> str:
@@ -90,7 +132,7 @@ def normalize_country(name: str) -> str:
         return "ВЕЛИКОБРИТАНІЯ"
     if n in ("USA","U.S.A.","UNITED STATES","UNITED STATES OF AMERICA","ШТАТИ","АМЕРИКА","US","U.S."):
         return "США"
-    if n in ("ITALY","ИТАЛИЯ","ІТАЛІЯ","ITALIA","+39"):  # для USSD
+    if n in ("ITALY","ИТАЛИЯ","ІТАЛІЯ","ITALIA","+39"):
         return "ІТАЛІЯ"
     if n in ("МОЛДОВА","MOLDOVA","+373"):
         return "МОЛДОВА"
@@ -401,55 +443,42 @@ USSD_DATA: Dict[str, List[Tuple[Optional[str], str]]] = {
     "ЧЕХІЯ": [("T-mobile", "*101#"), ("Kaktus", "*103#")],
     "МОЛДОВА": [(None, "*444# (потім 3)")],
     "КАЗАХСТАН": [(None, "*120#")],
-    # США — навмисно без кодів: фолбек нижче
+    # США — без кодів: фолбек нижче
 }
 FALLBACK_PLASTIC_MSG = "Номер вказаний на пластику сім-карти"
 
 def render_ussd_targets(targets: List[Dict[str, str]]) -> str:
-    """Строге форматування USSD-відповіді з фолбеком, якщо коду немає."""
     result_lines: List[str] = []
-
     for t in targets:
         country = normalize_country(t.get("country", "")).upper()
         if not country:
             continue
-
         op_req = canonical_operator_any(t.get("operator"))
-
         code_prefix = DIAL_CODES.get(country, "")
         flag = FLAGS.get(country, "")
         disp = DISPLAY.get(country, country.title())
-
         pairs = USSD_DATA.get(country, [])
         if op_req and pairs:
             pairs = [p for p in pairs if (p[0] and canonical_operator_any(p[0]) == op_req)]
-
         if not pairs:
-            # ФОЛБЕК: НЕ вигадуємо коди
             if op_req:
                 result_lines.append(f"{code_prefix} {flag} {disp} (оператор {op_req}) — {FALLBACK_PLASTIC_MSG}")
             else:
                 result_lines.append(f"{code_prefix} {flag} {disp} — {FALLBACK_PLASTIC_MSG}")
             result_lines.append("")
             continue
-
         for op, code in pairs:
-            if op and code.startswith("*"):
-                result_lines.append(f"{code_prefix} {flag} {disp} (оператор {op}) — {code}")
-            elif op and not code.startswith("*"):
+            if op:
                 result_lines.append(f"{code_prefix} {flag} {disp} (оператор {op}) — {code}")
             else:
                 result_lines.append(f"{code_prefix} {flag} {disp} — {code}")
         result_lines.append("")
-
     while result_lines and result_lines[-1] == "":
         result_lines.pop()
-
     return "\n".join(result_lines).strip()
 
 # ==== Додатково: витяг процитованого тексту ====
 def extract_quoted_text(message: Optional[Message]) -> Optional[str]:
-    """Якщо користувач відповів (reply) на старе повідомлення з даними — повертаємо текст цитати."""
     if not message:
         return None
     rt = message.reply_to_message
@@ -717,6 +746,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
+    now = time.time()
+
+    # --- «Режим оператора» ---
+    if "client_seen" not in context.chat_data:
+        context.chat_data["client_seen"] = False
+
+    # Якщо пише менеджер (у т.ч. @Sim_Card_Three) — бот НІКОЛИ не відповідає.
+    if _is_manager_message(msg):
+        history.append({"role": "assistant", "content": raw_user_message})
+        _prune_history(history)
+        # Вмикаємо «тишу» лише якщо клієнт уже проявився, щоб авто-перший меседж не вимикав бота
+        if context.chat_data.get("client_seen"):
+            context.chat_data["manual_silence_until"] = now + MANUAL_SILENCE_SEC
+        return
+
+    # Позначаємо, що клієнт проявився
+    context.chat_data["client_seen"] = True
+
+    # Якщо «тиша» активна — лише логувати і продовжити таймер мовчання
+    manual_until = context.chat_data.get("manual_silence_until", 0)
+    if manual_until and now < manual_until:
+        context.chat_data["manual_silence_until"] = now + MANUAL_SILENCE_SEC
+        history.append({"role": "user", "content": raw_user_message})
+        _prune_history(history)
+        return
 
     # Додаємо процитований текст (reply) як частину корисного навантаження до GPT
     quoted_text = extract_quoted_text(msg)
@@ -727,13 +781,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + "\n\n[ЦЕ ПРОЦИТОВАНЕ ПОВІДОМЛЕННЯ КЛІЄНТА (вважай частиною актуальних даних):]\n"
             + quoted_text
         )
-
-    # --- (A) Якщо щойно було оформлено замовлення і користувач пише «Ок/Дякую/Жду» — не дублюємо підсумок
-    last_sig = context.chat_data.get("last_order_sig")
-    last_time = context.chat_data.get("last_order_time", 0)
-    if last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC) and is_ack_only(raw_user_message):
-        await msg.reply_text("Дякуємо! Замовлення вже в роботі 😊")
-        return
 
     # 1) Основний виклик GPT
     reply_text = await _ask_gpt_main(history, user_payload)
@@ -746,6 +793,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
         current_sig = _order_signature(parsed)
+        last_sig = context.chat_data.get("last_order_sig")
+        last_time = context.chat_data.get("last_order_time", 0)
         if last_sig and current_sig == last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC):
             if not is_ack_only(raw_user_message):
                 await msg.reply_text("Замовлення вже прийнято, дякуємо! Якщо буде ще щось — пишіть 🙂")
