@@ -709,6 +709,10 @@ def build_followup_prompt() -> str:
         "Прайс або інше повідомлення щойно надіслано окремо. "
         "Відповідай КОРОТКО на інші частини останнього повідомлення, що НЕ стосуються вже надісланих даних.\n\n"
         "Якщо просили ЛИШЕ ціну/прайс — поверни порожній рядок. Не пиши шаблонні підтвердження наявності.\n\n"
+        # ⛔ важливо: нічого «технічного» не друкувати
+        "НІКОЛИ не виводь кодові блоки, таблиці або довільний JSON. "
+        "Можеш робити обчислення «в голові», але результат у вигляді коду/JSON НЕ друкуй. "
+        "ЄДИНИЙ виняток — коли користувач питає, як дізнатися/перевірити номер (USSD): тоді можна повернути ЛИШЕ JSON за заданою схемою.\n\n"
         "Якщо користувач просить «зв’язатися з людиною/менеджером/оператором» — це звернення до МЕНЕДЖЕРА. Відповідай: «Очікуйте відповіді менеджера.»\n\n"
         "Якщо питають, як дізнатися/перевірити номер — ВІДПОВІДАЙ ЛИШЕ JSON:\n"
         "{\n"
@@ -760,6 +764,18 @@ def is_meaningful_followup(text: str) -> bool:
         if re.match(p, low):
             return False
     return len(t) >= 4
+
+# ---- детектор код-блоків/JSON (щоб не показувати клієнту)
+def _looks_like_code_or_json(s: str) -> bool:
+    t = (s or "").strip()
+    if not t:
+        return False
+    return (
+        t.startswith("```") or
+        t.lower().startswith("```json") or
+        t.startswith("{") or
+        t.lower().startswith("json")
+    )
 
 def _ensure_history(ctx: ContextTypes.DEFAULT_TYPE) -> List[Dict[str, str]]:
     if "history" not in ctx.chat_data:
@@ -1027,6 +1043,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # follow-up: USSD або коротка відповідь
         follow = await _ask_gpt_followup(history, user_payload)
+
+        # 1) Якщо це USSD-JSON — рендеримо
         ussd_targets = try_parse_ussd_json(follow)
         if ussd_targets:
             formatted = render_ussd_targets(ussd_targets) or FALLBACK_PLASTIC_MSG
@@ -1036,6 +1054,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop("point4_hint", None)
             await msg.reply_text(formatted)
             return
+
+        # 2) Будь-які інші код-блоки/JSON — ігноруємо (рахувати «в голові» можна, але не друкувати)
+        if _looks_like_code_or_json(follow):
+            follow = ""
+
+        # 3) Якщо залишився осмислений короткий текст — віддаємо
         if is_meaningful_followup(follow):
             if not contains_us_activation_block(follow):
                 history.append({"role": "assistant", "content": follow})
