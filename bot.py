@@ -1,3 +1,4 @@
+# bot.py
 import os
 import time
 import logging
@@ -21,13 +22,16 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-ORDER_GROUP_CHAT_ID = "-1004832242322"  # ID групи для надсилання замовлень
+PORT = int(os.getenv("PORT", "8443"))
 
 openai.api_key = OPENAI_API_KEY
 
 # ==== Константи пам'яті/міток ====
 MAX_TURNS = 14
 ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
+
+# ==== КУДА ДУБУЮ Є ЗАМОВЛЕННЯ (ГРУПА) ====
+ORDER_FORWARD_CHAT_ID = int(os.getenv("ORDER_FORWARD_CHAT_ID", "-4832242322"))
 
 # ==== Ігнор/врахування повідомлень менеджера ====
 def _parse_ids(env: Optional[str]) -> Set[int]:
@@ -916,18 +920,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await msg.reply_text(summary)
             await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
-            
-            # Надсилання замовлення до групи
-            if ORDER_GROUP_CHAT_ID:
-                try:
-                    await context.bot.send_message(
-                        chat_id=ORDER_GROUP_CHAT_ID,
-                        text=summary,
-                        parse_mode="MarkdownV2"
-                    )
-                except Exception as e:
-                    logger.error(f"Помилка при надсиланні замовлення до групи {ORDER_GROUP_CHAT_ID}: {e}")
 
+            # ---> Дублікат у групу
+            try:
+                await context.bot.send_message(
+                    chat_id=ORDER_FORWARD_CHAT_ID,
+                    text=f"🔔 Нове замовлення\n\n{summary}"
+                )
+            except Exception as e:
+                logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
             return
         # якщо не вийшло — ідемо звичайним шляхом
 
@@ -973,17 +974,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(summary)
         await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
 
-        # Надсилання замовлення до групи
-        if ORDER_GROUP_CHAT_ID:
-            try:
-                await context.bot.send_message(
-                    chat_id=ORDER_GROUP_CHAT_ID,
-                    text=summary,
-                    parse_mode="MarkdownV2"
-                )
-            except Exception as e:
-                logger.error(f"Помилка при надсиланні замовлення до групи {ORDER_GROUP_CHAT_ID}: {e}")
-
+        # ---> Дублікат у групу
+        try:
+            await context.bot.send_message(
+                chat_id=ORDER_FORWARD_CHAT_ID,
+                text=f"🔔 Нове замовлення\n\n{summary}"
+            )
+        except Exception as e:
+            logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
         return
 
     # 3) Режим цін/наявності
