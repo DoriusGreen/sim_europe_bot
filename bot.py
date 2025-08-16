@@ -143,16 +143,29 @@ def render_price_block(country_key: str) -> str:
         lines.append(line)
     return header + "\n".join(lines) + "\n\n"
 
+# --- НОВЕ: перелік доступних країн і повідомлення про відсутність ---
+def available_list_text() -> str:
+    names = [DISPLAY[k] for k in PRICE_TIERS.keys()]
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " та " + names[-1]
+
+def render_unavailable(unavail: List[str]) -> str:
+    names = [str(x).strip() for x in unavail if str(x).strip()]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"На жаль, {names[0]} SIM-карти наразі недоступні. У наявності: {available_list_text()}."
+    return f"На жаль, {', '.join(names)} наразі недоступні. У наявності: {available_list_text()}."
+# --------------------------------------------------------------------
+
 def render_prices(countries: List[str]) -> str:
-    if not countries:
-        countries = list(PRICE_TIERS.keys())
+    # Рендеримо ТІЛЬКИ запитані та доступні країни; без fallback на «всі».
     blocks = []
     for c in countries:
         key = normalize_country(c).upper()
         if key in PRICE_TIERS:
             blocks.append(render_price_block(key))
-    if not blocks:
-        blocks = [render_price_block(k) for k in PRICE_TIERS.keys()]
     return "".join(blocks)
 
 # ==== Форматування ПІДСУМКУ (імʼя/місто/тел/№) ====
@@ -328,8 +341,8 @@ def contains_us_activation_block(text: str) -> bool:
 def build_system_prompt() -> str:
     return (
         "Ти — дружелюбний і корисний Telegram-бот-магазин SIM-карт. "
-        "На початку чату клієнт уже отримав прайси від аккаунта власника — ти їх не дублюєш, а підхоплюєш діалог. "
-        "Відповідай по суті, запамʼятовуй контекст (історію чату), не перепитуй одне й те саме.\n\n"
+        "На початку чату клієнт уже отримує від акаунта власника перелік країн у наявності та інформацію для доставки — ти це НЕ ДУБЛЮЄШ. "
+        "Не надсилай прайси чи чек-лист автоматично; роби це лише коли користувач прямо просить або вже надіслав хоча б один із пунктів замовлення.\n\n"
         "ПОВНЕ замовлення складається з 4 пунктів:\n"
         "1. Ім'я та прізвище.\n"
         "2. Номер телефону.\n"
@@ -362,6 +375,8 @@ def build_system_prompt() -> str:
         '  "ask_prices": true,\n'
         '  "countries": ["ALL" або перелік ключів, напр. "ВЕЛИКОБРИТАНІЯ","США"]\n'
         "}\n\n"
+        "ДОСТУПНІ ЛИШЕ країни з переліку: ВЕЛИКОБРИТАНІЯ, НІДЕРЛАНДИ, НІМЕЧЧИНА, ФРАНЦІЯ, ІСПАНІЯ, ЧЕХІЯ, ПОЛЬЩА, ЛИТВА, ЛАТВІЯ, КАЗАХСТАН, МАРОККО, США. "
+        "НІКОЛИ не стверджуй наявність/ціну для інших країн. Якщо питають про інші — відповідай, що наразі недоступні, і запропонуй вибір із наявних.\n\n"
         "Правила семантики:\n"
         "• Розумій країни за синонімами/містами/мовою (UK/United Kingdom/+44/Британія → ВЕЛИКОБРИТАНІЯ; USA/Америка/Штати → США).\n"
         "• Якщо клієнт для Англії називає оператора (O2, Lebara, Vodafone) — додай поле \"operator\"; інакше — ні.\n"
@@ -535,17 +550,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1) Основний виклик GPT
     reply_text = await _ask_gpt_main(history, user_message)
 
-    # Підправляємо заголовок чек-листа якщо забули емодзі
+    # Уніфікуємо заголовок, якщо модель забула емодзі
     if "Залишилось вказати:" in reply_text and "📝 Залишилось вказати:" not in reply_text:
         reply_text = reply_text.replace("Залишилось вказати:", "📝 Залишилось вказати:")
 
-    # 2) Якщо вже прийшов повний JSON — фіналізуємо
+    # 2) Якщо прийшов JSON повного замовлення — парсимо, рахуємо, рендеримо
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
         summary = render_order(parsed)
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": summary})
         _prune_history(history)
+
         await msg.reply_text(summary)
         await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
         return
@@ -554,20 +570,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price_countries = try_parse_price_json(reply_text)
     if price_countries is not None:
         want_all = any(str(c).upper() == "ALL" for c in price_countries)
-        countries = list(PRICE_TIERS.keys()) if want_all else [
-            c for c in (normalize_country(str(c)).upper() for c in price_countries)
-            if c in PRICE_TIERS
-        ]
-        price_msg = render_prices(countries)
+        normalized = [normalize_country(str(c)).upper() for c in price_countries if str(c).strip()]
+        valid = [k for k in normalized if k in PRICE_TIERS]
+        invalid = [price_countries[i] for i, k in enumerate(normalized) if k not in PRICE_TIERS and str(price_countries[i]).upper() != "ALL"]
 
-        history.append({"role": "user", "content": user_message})
-        history.append({"role": "assistant", "content": price_msg})
-        _prune_history(history)
-
-        await msg.reply_text(price_msg)
+        if want_all:
+            price_msg = "".join(render_price_block(k) for k in PRICE_TIERS.keys())
+            history.append({"role": "user", "content": user_message})
+            history.append({"role": "assistant", "content": price_msg})
+            _prune_history(history)
+            await msg.reply_text(price_msg)
+        elif valid:
+            price_msg = render_prices(valid)
+            history.append({"role": "user", "content": user_message})
+            history.append({"role": "assistant", "content": price_msg})
+            _prune_history(history)
+            await msg.reply_text(price_msg)
+            if invalid:
+                await msg.reply_text(render_unavailable(invalid))
+        else:
+            unavailable_msg = render_unavailable(invalid if invalid else price_countries)
+            history.append({"role": "user", "content": user_message})
+            history.append({"role": "assistant", "content": unavailable_msg})
+            _prune_history(history)
+            await msg.reply_text(unavailable_msg)
 
         # 3a) Якщо запит включає США — додатково надіслати інструкцію США
-        usa_intent = ("США" in countries and (len(countries) == 1 or user_mentions_usa(user_message)))
+        usa_intent = (("США" in valid) and (len(valid) == 1 or user_mentions_usa(user_message)))
         usa_activation_sent = False
         if usa_intent:
             await msg.reply_text(US_ACTIVATION_MSG)
@@ -596,7 +625,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
             return
 
-    # 5) Інакше — звичайна відповідь моделі (чек-лист/FAQ тощо)
+    # 5) Інакше — звичайна відповідь моделі (включно з 🛒/📝/FAQ)
     history.append({"role": "user", "content": user_message})
     history.append({"role": "assistant", "content": reply_text})
     _prune_history(history)
