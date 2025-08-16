@@ -1,5 +1,6 @@
 # bot.py
 import os
+import time
 import logging
 from typing import List, Dict, Optional, Set, Any, Tuple
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ openai.api_key = OPENAI_API_KEY
 
 # ==== Константи пам'яті/міток ====
 MAX_TURNS = 14
+ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
 
 # ==== Стандартні повідомлення ====
 ORDER_INFO_REQUEST = (
@@ -79,7 +81,7 @@ DIAL_CODES = {
     "ЧЕХІЯ": "+420",
     "МОЛДОВА": "+373",
     "КАЗАХСТАН": "+7",
-    "США": "+1",  # додано
+    "США": "+1",
 }
 
 def normalize_country(name: str) -> str:
@@ -253,6 +255,13 @@ class OrderData:
     np: str
     items: List[OrderItem]
 
+def _order_signature(order: OrderData) -> str:
+    items_sig = ";".join(
+        f"{normalize_country(it.country)}:{int(it.qty)}:{canonical_operator(it.operator) or ''}"
+        for it in order.items
+    )
+    return f"{format_full_name(order.full_name)}|{format_phone(order.phone)}|{format_city(order.city)}|{format_np(order.np)}|{items_sig}"
+
 def render_order(order: OrderData) -> str:
     lines = []
     grand_total = 0
@@ -330,13 +339,6 @@ def try_parse_price_json(text: str) -> Optional[List[str]]:
         return None
 
 def try_parse_ussd_json(text: str) -> Optional[List[Dict[str, str]]]:
-    """
-    Очікуємо:
-    {
-      "ask_ussd": true,
-      "targets": [ {"country":"ІСПАНІЯ","operator":"Lebara"}, {"country":"ФРАНЦІЯ"} ]
-    }
-    """
     m = USSD_JSON_RE.search(text or "")
     if not m:
         return None
@@ -389,7 +391,6 @@ def contains_us_activation_block(text: str) -> bool:
     return ("lycamobile.us/en/activate-sim" in t) or ("як активувати та поповнити сім-карту сша" in t)
 
 # ==== ДОВІДНИК USSD КОМБІНАЦІЙ ====
-# (operator=None означає, що код загальний без прив’язки до оператора)
 USSD_DATA: Dict[str, List[Tuple[Optional[str], str]]] = {
     "ВЕЛИКОБРИТАНІЯ": [("Vodafone", "*#100#"), ("Lebara", "*#100#"), ("O2", "комбінації немає, номер вказаний на упаковці.")],
     "ІСПАНІЯ": [("Lebara", "*321#"), ("Movistar", "*133#"), ("Lycamobile", "*321#")],
@@ -400,9 +401,8 @@ USSD_DATA: Dict[str, List[Tuple[Optional[str], str]]] = {
     "ЧЕХІЯ": [("T-mobile", "*101#"), ("Kaktus", "*103#")],
     "МОЛДОВА": [(None, "*444# (потім 3)")],
     "КАЗАХСТАН": [(None, "*120#")],
-    # США — навмисно відсутні коди: буде застосовано фолбек нижче
+    # США — навмисно відсутні коди: фолбек нижче
 }
-
 FALLBACK_PLASTIC_MSG = "Номер вказаний на пластику сім-карти"
 
 def render_ussd_targets(targets: List[Dict[str, str]]) -> str:
@@ -416,26 +416,23 @@ def render_ussd_targets(targets: List[Dict[str, str]]) -> str:
 
         op_req = canonical_operator_any(t.get("operator"))
 
-        # Базові атрибути рядка
         code_prefix = DIAL_CODES.get(country, "")
         flag = FLAGS.get(country, "")
         disp = DISPLAY.get(country, country.title())
 
         pairs = USSD_DATA.get(country, [])
-        # Якщо є конкретний оператор — фільтруємо; якщо після фільтру пусто, спрацює фолбек
         if op_req and pairs:
             pairs = [p for p in pairs if (p[0] and canonical_operator_any(p[0]) == op_req)]
 
         if not pairs:
-            # ФОЛБЕК: коли країни/оператора немає у таблиці — не вигадуємо коди
+            # ФОЛБЕК: НЕ вигадуємо коди
             if op_req:
                 result_lines.append(f"{code_prefix} {flag} {disp} (оператор {op_req}) — {FALLBACK_PLASTIC_MSG}")
             else:
                 result_lines.append(f"{code_prefix} {flag} {disp} — {FALLBACK_PLASTIC_MSG}")
-            # Переходимо до наступної країни
+            result_lines.append("")
             continue
 
-        # Інакше — рендеримо всі наявні коди
         for op, code in pairs:
             if op and code.startswith("*"):
                 result_lines.append(f"{code_prefix} {flag} {disp} (оператор {op}) — {code}")
@@ -443,11 +440,8 @@ def render_ussd_targets(targets: List[Dict[str, str]]) -> str:
                 result_lines.append(f"{code_prefix} {flag} {disp} (оператор {op}) — {code}")
             else:
                 result_lines.append(f"{code_prefix} {flag} {disp} — {code}")
-
-        # Порожній рядок між країнами
         result_lines.append("")
 
-    # Приберемо останній зайвий розрив, якщо є
     while result_lines and result_lines[-1] == "":
         result_lines.pop()
 
@@ -583,23 +577,31 @@ def build_force_point4_prompt() -> str:
         "Твоє завдання — витягти пункт 4, поєднати з пунктами 1–3 з контексту і ПОВЕРНУТИ ЛИШЕ ПОВНИЙ JSON замовлення."
     )
 
-# ---- фільтр follow-up
+# ---- фільтр follow-up та короткі «Ок/Дякую»
+ACK_PATTERNS = [
+    r"^\s*(ок(ей)?|добре|чудово|гарно|дякую!?|спасибі|спасибо|жду|чекаю|ок,?\s*жду|ок,?\s*чекаю)\s*[\.\!]*\s*$",
+    r"^\s*[👍🙏✅👌]+\s*$",
+]
+def is_ack_only(text: str) -> bool:
+    if not text:
+        return False
+    low = text.strip().lower()
+    for p in ACK_PATTERNS:
+        if re.match(p, low):
+            return True
+    return False
+
 def is_meaningful_followup(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
     low = t.lower()
 
-    # не слати службові/зайві фрази
     banned_words = ["ціни", "прайс", "надіслано", "див. вище", "вище", "повторю"]
     if any(w in low for w in banned_words):
         return False
-
-    # маркери прайсу
     if "грн" in low or re.search(r"\bшт\.?\b", low):
         return False
-
-    # відсікаємо шаблонні підтвердження наявності
     availability_patterns = [
         r"^підтверджую( наявність)?\.?$",
         r"^є в наявності\.?$",
@@ -611,7 +613,6 @@ def is_meaningful_followup(text: str) -> bool:
     for p in availability_patterns:
         if re.match(p, low):
             return False
-
     return len(t) >= 4
 
 def _ensure_history(ctx: ContextTypes.DEFAULT_TYPE) -> List[Dict[str, str]]:
@@ -695,6 +696,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
 
+    # --- (A) Якщо щойно було оформлено замовлення і користувач пише «Ок/Дякую/Жду» — не дублюємо підсумок
+    last_sig = context.chat_data.get("last_order_sig")
+    last_time = context.chat_data.get("last_order_time", 0)
+    if last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC) and is_ack_only(user_message):
+        await msg.reply_text("Дякуємо! Замовлення вже в роботі 😊")
+        return
+
     # 1) Основний виклик GPT
     reply_text = await _ask_gpt_main(history, user_message)
 
@@ -705,7 +713,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2) Якщо прийшов JSON повного замовлення — парсимо, рахуємо, рендеримо
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
+        # антидубль: однуковий «підпис» замовлення
+        current_sig = _order_signature(parsed)
+        if last_sig and current_sig == last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC):
+            # не дублюємо підсумок, відповідаємо коротко лише якщо це не порожнє «Ок»
+            if not is_ack_only(user_message):
+                await msg.reply_text("Замовлення вже прийнято, дякуємо! Якщо буде ще щось — пишіть 🙂")
+            return
+
         summary = render_order(parsed)
+        # зберігаємо підпис і час
+        context.chat_data["last_order_sig"] = current_sig
+        context.chat_data["last_order_time"] = time.time()
+
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": summary})
         _prune_history(history)
@@ -767,7 +787,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(follow)
         return
 
-    # 4) Якщо GPT одразу повернув USSD JSON — рендеримо (з фолбеком), щоб не відправляти «сирий» JSON
+    # 4) Якщо GPT одразу повернув USSD JSON — рендеримо (з фолбеком)
     ussd_targets = try_parse_ussd_json(reply_text)
     if ussd_targets:
         formatted = render_ussd_targets(ussd_targets) or FALLBACK_PLASTIC_MSG
@@ -782,12 +802,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         force_json = await _ask_gpt_force_point4(history, user_message)
         forced = try_parse_order_json(force_json)
         if forced and forced.items and forced.full_name and forced.phone and forced.city and forced.np:
-            summary = render_order(forced)
-            history.append({"role": "user", "content": user_message})
-            history.append({"role": "assistant", "content": summary})
-            _prune_history(history)
-            await msg.reply_text(summary)
-            await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
+            current_sig = _order_signature(forced)
+            if not (context.chat_data.get("last_order_sig") == current_sig and (time.time() - context.chat_data.get("last_order_time", 0) <= ORDER_DUP_WINDOW_SEC)):
+                summary = render_order(forced)
+                context.chat_data["last_order_sig"] = current_sig
+                context.chat_data["last_order_time"] = time.time()
+
+                history.append({"role": "user", "content": user_message})
+                history.append({"role": "assistant", "content": summary})
+                _prune_history(history)
+                await msg.reply_text(summary)
+                await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
             return
 
     # 6) Інакше — звичайна відповідь моделі (включно з 🛒/📝/FAQ)
