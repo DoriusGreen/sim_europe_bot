@@ -113,7 +113,6 @@ FLAGS = {
     "КАЗАХСТАН": "🇰🇿",
     "МАРОККО": "🇲🇦",
     "США": "🇺🇸",
-    # для USSD-довідки
     "ІТАЛІЯ": "🇮🇹",
     "МОЛДОВА": "🇲🇩",
 }
@@ -464,7 +463,6 @@ USSD_DATA: Dict[str, List[Tuple[Optional[str], str]]] = {
     "МОЛДОВА": [(None, "*444# (потім 3)")],
     "КАЗАХСТАН": [(None, "*120#")],
     "ЛАТВІЯ": [(None, "Киньте виклик на український номер — ваш латвійський номер відобразиться у виклику/на екрані.")],
-    # США — без коду: фолбек унизу
 }
 FALLBACK_PLASTIC_MSG = "Номер вказаний на пластику сім-карти"
 
@@ -507,6 +505,23 @@ def extract_quoted_text(message: Optional[Message]) -> Optional[str]:
         return None
     text = (rt.text or rt.caption or "").strip()
     return text or None
+
+# ==== Детектор «тільки кількість» після прайсу ====
+QTY_ONLY_RE = re.compile(
+    r"(?:\bпо\b\s*)?(\d{1,4})\s*(шт|штук|шт\.?|сим(?:-?карт[аи])?|sim-?card|sim|pieces?)\b",
+    re.IGNORECASE
+)
+
+def detect_qty_only(text: str) -> Optional[int]:
+    if not text:
+        return None
+    m = QTY_ONLY_RE.search(text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
 
 # ==== СИСТЕМНІ ПРОМПТИ ====
 def build_system_prompt() -> str:
@@ -772,7 +787,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + quoted_text
         )
 
-    # Якщо до цього бракувало САМЕ пункту 4 — одразу пробуємо force-point4
+    # === НОВЕ: якщо написали тільки кількість, а перед цим показували прайс — підкажемо країни ===
+    last_price_countries: Optional[List[str]] = context.chat_data.get("last_price_countries")
+    qty_only = detect_qty_only(raw_user_message)
+    if qty_only and last_price_countries:
+        hint_countries = ", ".join(last_price_countries)
+        user_payload += (
+            f"\n\n[ПІДСКАЗКА ДЛЯ ПАРСИНГУ: користувач вказав лише кількість {qty_only} шт. "
+            f"Застосуй її до кожної з останніх країн, для яких щойно показували прайс: {hint_countries}. "
+            f"Це відповідає пункту 4 (країна/кількість).]"
+        )
+        # вважаємо, що п.4 вже є, чекаємо 1–3
+        context.chat_data["awaiting_missing"] = {1, 2, 3}
+        context.chat_data["point4_hint"] = {"qty": qty_only, "countries": last_price_countries, "ts": time.time()}
+
+    # Якщо ми вже чекаємо 1–3 і є підказка за п.4 — дублюємо її в payload, щоб GPT точно склеїв
+    if context.chat_data.get("awaiting_missing") == {1, 2, 3} and context.chat_data.get("point4_hint"):
+        h = context.chat_data["point4_hint"]
+        hc = ", ".join(h["countries"])
+        user_payload += (
+            f"\n\n[НАГАДУВАННЯ ДЛЯ ПАРСИНГУ: пункт 4 вже відомий: {hc} — по {h['qty']} шт. "
+            f"Додай/склей з наданими нижче пунктами 1–3.]"
+        )
+
+    # Якщо до цього бракувало САМЕ п.4 — пробуємо force-point4
     awaiting = context.chat_data.get("awaiting_missing")
     if awaiting == {4}:
         force_json = await _ask_gpt_force_point4(history, user_payload)
@@ -783,6 +821,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data["last_order_sig"] = sig
             context.chat_data["last_order_time"] = time.time()
             context.chat_data.pop("awaiting_missing", None)
+            context.chat_data.pop("point4_hint", None)
 
             history.append({"role": "user", "content": raw_user_message})
             history.append({"role": "assistant", "content": summary})
@@ -800,6 +839,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "Залишилось вказати:" in reply_text and "📝 Залишилось вказати:" not in reply_text:
         reply_text = reply_text.replace("Залишилось вказати:", "📝 Залишилось вказати:")
 
+    # Якщо GPT все одно повернув повний чек-лист, а ми вже дали п.4 — скоригуємо підказку для користувача
+    if reply_text.strip().startswith("🛒 Для оформлення замовлення") and context.chat_data.get("awaiting_missing") == {1, 2, 3}:
+        reply_text = (
+            "📝 Залишилось вказати:\n\n"
+            "1. Ім'я та прізвище.\n"
+            "2. Номер телефону.\n"
+            "3. Місто та № відділення \"Нової Пошти\".\n"
+        )
+
     # 2) Якщо прийшов JSON повного замовлення — парсимо
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
@@ -810,12 +858,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not is_ack_only(raw_user_message):
                 await msg.reply_text("Замовлення вже прийнято, дякуємо! Якщо буде ще щось — пишіть 🙂")
             context.chat_data.pop("awaiting_missing", None)
+            context.chat_data.pop("point4_hint", None)
             return
 
         summary = render_order(parsed)
         context.chat_data["last_order_sig"] = current_sig
         context.chat_data["last_order_time"] = time.time()
         context.chat_data.pop("awaiting_missing", None)
+        context.chat_data.pop("point4_hint", None)
 
         history.append({"role": "user", "content": raw_user_message})
         history.append({"role": "assistant", "content": summary})
@@ -833,6 +883,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         valid = [k for k in normalized if k in PRICE_TIERS]
         invalid = [price_countries[i] for i, k in enumerate(normalized)
                    if k not in PRICE_TIERS and str(price_countries[i]).upper() != "ALL"]
+
+        # ЗАПАМ’ЯТОВУЄМО, ДЛЯ ЯКИХ КРАЇН ПОКАЗАЛИ ПРАЙС
+        if want_all:
+            context.chat_data["last_price_countries"] = list(PRICE_TIERS.keys())
+        else:
+            context.chat_data["last_price_countries"] = valid[:] if valid else []
 
         if want_all:
             price_msg = "".join(render_price_block(k) for k in PRICE_TIERS.keys())
@@ -868,6 +924,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history.append({"role": "assistant", "content": formatted})
             _prune_history(history)
             context.chat_data.pop("awaiting_missing", None)
+            context.chat_data.pop("point4_hint", None)
             await msg.reply_text(formatted)
             return
         if is_meaningful_followup(follow):
@@ -887,6 +944,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "assistant", "content": formatted})
         _prune_history(history)
         context.chat_data.pop("awaiting_missing", None)
+        context.chat_data.pop("point4_hint", None)
         await msg.reply_text(formatted)
         return
 
@@ -897,7 +955,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif missing:
         context.chat_data["awaiting_missing"] = missing
     else:
-        context.chat_data.pop("awaiting_missing", None)
+        # якщо ми вже підсунули п.4 через qty-only — лишаємо {1,2,3}; інакше очищаємо
+        if context.chat_data.get("awaiting_missing") != {1, 2, 3}:
+            context.chat_data.pop("awaiting_missing", None)
 
     # 6) Інакше — звичайна відповідь моделі
     history.append({"role": "user", "content": raw_user_message})
