@@ -79,6 +79,48 @@ def _is_manager_message(msg: Message) -> bool:
         return True
     return False
 
+# ====== ДОПОМОЖНІ: відкладене надсилання підсумку в групу ======
+FORWARD_DELAY_SEC = 180  # 3 хвилини
+
+async def _forward_job_callback(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """JobQueue callback: відправити підсумок у групу, якщо він ще актуальний."""
+    data = ctx.job.data or {}
+    summary = data.get("summary")
+    if not summary:
+        return
+    try:
+        await ctx.bot.send_message(chat_id=ORDER_FORWARD_CHAT_ID, text=summary)
+    except Exception as e:
+        logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
+    # прибираємо позначки про заплановане надсилання для цього чату
+    ctx.chat_data.pop("pending_forward_job", None)
+    ctx.chat_data.pop("pending_forward_summary", None)
+    ctx.chat_data.pop("pending_forward_created_at", None)
+
+def _cancel_pending_forward(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Скасувати попереднє заплановане відправлення, якщо було."""
+    job = context.chat_data.pop("pending_forward_job", None)
+    if job:
+        try:
+            job.schedule_removal()
+        except Exception:
+            pass
+
+def _schedule_forward(context: ContextTypes.DEFAULT_TYPE, chat_id: int, summary: str) -> None:
+    """Запланувати відправлення підсумку в групу через FORWARD_DELAY_SEC.
+       Якщо вже було заплановано — скасувати і поставити заново (надсилатиметься остання версія)."""
+    _cancel_pending_forward(context)
+    job = context.application.job_queue.run_once(
+        _forward_job_callback,
+        when=FORWARD_DELAY_SEC,
+        data={"summary": summary},
+        chat_id=chat_id,
+        name=f"forward_{chat_id}"
+    )
+    context.chat_data["pending_forward_job"] = job
+    context.chat_data["pending_forward_summary"] = summary
+    context.chat_data["pending_forward_created_at"] = time.time()
+
 # ==== Стандартні повідомлення ====
 ORDER_INFO_REQUEST = (
     "🛒 Для оформлення замовлення напишіть:\n\n"
@@ -709,7 +751,6 @@ def build_followup_prompt() -> str:
         "Прайс або інше повідомлення щойно надіслано окремо. "
         "Відповідай КОРОТКО на інші частини останнього повідомлення, що НЕ стосуються вже надісланих даних.\n\n"
         "Якщо просили ЛИШЕ ціну/прайс — поверни порожній рядок. Не пиши шаблонні підтвердження наявності.\n\n"
-        # ⛔ важливо: нічого «технічного» не друкувати
         "НІКОЛИ не виводь кодові блоки, таблиці або довільний JSON. "
         "Можеш робити обчислення «в голові», але результат у вигляді коду/JSON НЕ друкуй. "
         "ЄДИНИЙ виняток — коли користувач питає, як дізнатися/перевірити номер (USSD): тоді можна повернути ЛИШЕ JSON за заданою схемою.\n\n"
@@ -937,14 +978,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(summary)
             await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
 
-            # ---> Дублікат у групу
-            try:
-                await context.bot.send_message(
-                    chat_id=ORDER_FORWARD_CHAT_ID,
-                    text=summary
-                )
-            except Exception as e:
-                logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
+            # ---> ВІДКЛАДЕНЕ НАДСИЛАННЯ В ГРУПУ (3 хв)
+            _schedule_forward(context, msg.chat_id, summary)
             return
         # якщо не вийшло — ідемо звичайним шляхом
 
@@ -990,14 +1025,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(summary)
         await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
 
-        # ---> Дублікат у групу
-        try:
-            await context.bot.send_message(
-                chat_id=ORDER_FORWARD_CHAT_ID,
-                text=summary
-            )
-        except Exception as e:
-            logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
+        # ---> ВІДКЛАДЕНЕ НАДСИЛАННЯ В ГРУПУ (3 хв)
+        _schedule_forward(context, msg.chat_id, summary)
         return
 
     # 3) Режим цін/наявності
