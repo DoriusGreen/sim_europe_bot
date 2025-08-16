@@ -478,50 +478,14 @@ def render_ussd_targets(targets: List[Dict[str, str]]) -> str:
     return "\n".join(result_lines).strip()
 
 # ==== Додатково: витяг процитованого тексту ====
-def _extract_blockquote_substrings(msg: Message) -> List[str]:
-    """Повертає всі фрагменти, позначені як blockquote/quote/text_quote у entities/caption_entities."""
-    results: List[str] = []
-    base_text = (msg.text or msg.caption or "") or ""
-    def pull(entities):
-        if not entities:
-            return
-        for ent in entities:
-            et = getattr(ent, "type", None)
-            tname = str(getattr(et, "name", et)).lower()
-            if tname in ("blockquote", "block_quote", "quote", "text_quote"):
-                try:
-                    start = int(ent.offset)
-                    length = int(ent.length)
-                    results.append(base_text[start:start+length])
-                except Exception:
-                    continue
-    pull(getattr(msg, "entities", None))
-    pull(getattr(msg, "caption_entities", None))
-    return [s for s in (x.strip() for x in results) if s]
-
 def extract_quoted_text(message: Optional[Message]) -> Optional[str]:
     if not message:
         return None
-    # 1) reply_to_message
     rt = message.reply_to_message
-    if rt:
-        txt = (rt.text or rt.caption or "").strip()
-        if txt:
-            return txt
-    # 2) blockquote / quote entities у самому повідомленні
-    parts = _extract_blockquote_substrings(message)
-    if parts:
-        return "\n\n".join(parts)
-    # 3) деякі обгортки мають message.quote / message.quote.text
-    q = getattr(message, "quote", None)
-    if q:
-        try:
-            qtext = getattr(q, "text", None) or (str(q) if isinstance(q, str) else None)
-            if qtext and str(qtext).strip():
-                return str(qtext).strip()
-        except Exception:
-            pass
-    return None
+    if not rt:
+        return None
+    text = (rt.text or rt.caption or "").strip()
+    return text or None
 
 # ==== СИСТЕМНІ ПРОМПТИ ====
 def build_system_prompt() -> str:
@@ -808,7 +772,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _prune_history(history)
         return
 
-    # Додаємо процитований текст (reply/blockquote) як частину корисного навантаження до GPT
+    # Додаємо процитований текст (reply) як частину корисного навантаження до GPT
     quoted_text = extract_quoted_text(msg)
     user_payload = raw_user_message
     if quoted_text:
@@ -817,24 +781,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + "\n\n[ЦЕ ПРОЦИТОВАНЕ ПОВІДОМЛЕННЯ КЛІЄНТА (вважай частиною актуальних даних):]\n"
             + quoted_text
         )
-
-    # (НОВЕ) Якщо попередній бот просив тільки пункт 4 — пробуємо force_point4 негайно
-    if context.chat_data.get("awaiting_missing") == {4}:
-        force_json = await _ask_gpt_force_point4(history, user_payload)
-        forced = try_parse_order_json(force_json)
-        if forced and forced.items and forced.full_name and forced.phone and forced.city and forced.np:
-            summary = render_order(forced)
-            context.chat_data["last_order_sig"] = _order_signature(forced)
-            context.chat_data["last_order_time"] = time.time()
-            context.chat_data["awaiting_missing"] = None
-
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": summary})
-            _prune_history(history)
-            await msg.reply_text(summary)
-            await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
-            return
-        # якщо не вдалося — не скидаємо стан і йдемо стандартним шляхом
 
     # 1) Основний виклик GPT
     reply_text = await _ask_gpt_main(history, user_payload)
@@ -857,7 +803,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary = render_order(parsed)
         context.chat_data["last_order_sig"] = current_sig
         context.chat_data["last_order_time"] = time.time()
-        context.chat_data["awaiting_missing"] = None  # скидаємо стан
 
         history.append({"role": "user", "content": raw_user_message})
         history.append({"role": "assistant", "content": summary})
@@ -897,9 +842,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _prune_history(history)
             await msg.reply_text(unavailable_msg)
 
-        # скидаємо очікування пункту 4 — бо була інша гілка
-        context.chat_data["awaiting_missing"] = None
-
         # 3a) США — надіслати інструкцію, якщо питали саме про США
         usa_intent = (("США" in valid) and (len(valid) == 1 or user_mentions_usa(raw_user_message)))
         usa_activation_sent = False
@@ -930,36 +872,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "user", "content": raw_user_message})
         history.append({"role": "assistant", "content": formatted})
         _prune_history(history)
-        context.chat_data["awaiting_missing"] = None  # скидаємо стан
         await msg.reply_text(formatted)
         return
 
-    # 5) Якщо бракує лише пункту 4 — пробуємо «force point 4» (пізній шанс)
+    # 5) Якщо бракує лише пункту 4 — пробуємо «force point 4»
     if missing_points_from_reply(reply_text) == {4}:
         force_json = await _ask_gpt_force_point4(history, user_payload)
         forced = try_parse_order_json(force_json)
         if forced and forced.items and forced.full_name and forced.phone and forced.city and forced.np:
-            summary = render_order(forced)
-            context.chat_data["last_order_sig"] = _order_signature(forced)
-            context.chat_data["last_order_time"] = time.time()
-            context.chat_data["awaiting_missing"] = None
+            current_sig = _order_signature(forced)
+            if not (context.chat_data.get("last_order_sig") == current_sig and (time.time() - context.chat_data.get("last_order_time", 0) <= ORDER_DUP_WINDOW_SEC)):
+                summary = render_order(forced)
+                context.chat_data["last_order_sig"] = current_sig
+                context.chat_data["last_order_time"] = time.time()
 
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": summary})
-            _prune_history(history)
-            await msg.reply_text(summary)
-            await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
+                history.append({"role": "user", "content": raw_user_message})
+                history.append({"role": "assistant", "content": summary})
+                _prune_history(history)
+                await msg.reply_text(summary)
+                await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
             return
 
     # 6) Інакше — звичайна відповідь моделі (включно з 🛒/📝/FAQ)
     history.append({"role": "user", "content": raw_user_message})
     history.append({"role": "assistant", "content": reply_text})
     _prune_history(history)
-
-    # (НОВЕ) зберігаємо стан, якщо модель просить рівно пункт 4
-    miss = missing_points_from_reply(reply_text)
-    context.chat_data["awaiting_missing"] = miss if miss == {4} else None
-
     await msg.reply_text(reply_text)
 
 # ===== Error handler =====
