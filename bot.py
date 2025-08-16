@@ -58,7 +58,7 @@ FLAGS = {
     "ВЕЛИКОБРИТАНІЯ": "🇬🇧", "НІДЕРЛАНДИ": "🇳🇱", "НІМЕЧЧИНА": "🇩🇪",
     "ФРАНЦІЯ": "🇫🇷", "ІСПАНІЯ": "🇪🇸", "ЧЕХІЯ": "🇨🇿", "ПОЛЬЩА": "🇵🇱",
     "ЛИТВА": "🇱🇹", "ЛАТВІЯ": "🇱🇻", "КАЗАХСТАН": "🇰🇿", "МАРОККО": "🇲🇦", "США": "🇺🇸",
-    # нижче — лише для USSD-відповідей (не впливає на прайс/наявність)
+    # нижче — тільки для USSD-відповідей (не впливає на прайс/наявність)
     "ІТАЛІЯ": "🇮🇹",
     "МОЛДОВА": "🇲🇩",
 }
@@ -90,7 +90,7 @@ def normalize_country(name: str) -> str:
         return "ВЕЛИКОБРИТАНІЯ"
     if n in ("USA","U.S.A.","UNITED STATES","UNITED STATES OF AMERICA","ШТАТИ","АМЕРИКА","US","U.S."):
         return "США"
-    if n in ("ITALY","ИТАЛИЯ","ІТАЛІЯ","ITALIA","+39"):  # тільки для USSD
+    if n in ("ITALY","ИТАЛИЯ","ІТАЛІЯ","ITALIA","+39"):  # для USSD
         return "ІТАЛІЯ"
     if n in ("МОЛДОВА","MOLDOVA","+373"):
         return "МОЛДОВА"
@@ -107,7 +107,7 @@ def canonical_operator(op: Optional[str]) -> Optional[str]:
     return None
 # -----------------------------------------------------------
 
-# ---------- ОПЕРАТОРИ ДЛЯ USSD (розширено) ----------
+# ---------- ОПЕРАТОРИ ДЛЯ USSD (довідка) ----------
 def canonical_operator_any(op: Optional[str]) -> Optional[str]:
     if not op:
         return None
@@ -401,7 +401,7 @@ USSD_DATA: Dict[str, List[Tuple[Optional[str], str]]] = {
     "ЧЕХІЯ": [("T-mobile", "*101#"), ("Kaktus", "*103#")],
     "МОЛДОВА": [(None, "*444# (потім 3)")],
     "КАЗАХСТАН": [(None, "*120#")],
-    # США — навмисно відсутні коди: фолбек нижче
+    # США — навмисно без кодів: фолбек нижче
 }
 FALLBACK_PLASTIC_MSG = "Номер вказаний на пластику сім-карти"
 
@@ -455,7 +455,6 @@ def extract_quoted_text(message: Optional[Message]) -> Optional[str]:
     rt = message.reply_to_message
     if not rt:
         return None
-    # беремо текст або підпис до медіа
     text = (rt.text or rt.caption or "").strip()
     return text or None
 
@@ -530,7 +529,7 @@ def build_system_prompt() -> str:
         # === ЕСКАЛАЦІЯ ДО ЛЮДИНИ (МЕНЕДЖЕРА) ===
         "Якщо користувач пише «зв’язатися з людиною/менеджером/оператором» або схоже — за замовчуванням мається на увазі зв’язок із МЕНЕДЖЕРОМ магазину, а НЕ дзвінки через SIM. "
         "В такому випадку відповідай коротко: «Якщо потрібна додаткова допомога або хочете зв'язатися з менеджером — очікуйте відповіді менеджера.» "
-        "Лише якщо користувач ЯВНО просить про дзвінки через SIM (наприклад «як подзвонити з цієї сімки») — тоді розповідай про поповнення/дзвінки.\n\n"
+        "Лише якщо користувач ЯВНО просить про дзвінки через SIM (напр. «як подзвонити з цієї сімки») — тоді розповідай про поповнення/дзвінки.\n\n"
 
         # === ПІСЛЯ JSON ===
         "Після JSON бекенд сам рахує суми та формує підсумок. «Загальна сумма» показується лише якщо країн 2+.\n\n"
@@ -619,7 +618,6 @@ def is_meaningful_followup(text: str) -> bool:
     if not t:
         return False
     low = t.lower()
-
     banned_words = ["ціни", "прайс", "надіслано", "див. вище", "вище", "повторю"]
     if any(w in low for w in banned_words):
         return False
@@ -647,7 +645,8 @@ def _prune_history(history: List[Dict[str, str]]) -> None:
     if len(history) > MAX_TURNS * 2:
         del history[: len(history) - MAX_TURNS * 2]
 
-async def _ask_gpt(messages: List[Dict[str, str]]) -> str:
+# ==== ЄДИНА низькорівнева функція звернення до OpenAI ====
+async def _openai_chat(messages: List[Dict[str, str]]) -> str:
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
@@ -660,17 +659,11 @@ async def _ask_gpt(messages: List[Dict[str, str]]) -> str:
         logger.error(f"Помилка при зверненні до OpenAI: {e}")
         return "Вибачте, сталася технічна помилка. Спробуйте, будь ласка, ще раз."
 
-async def _ask_gpt(messages_builder, history: List[Dict[str, str]], user_payload: str) -> str:
-    messages = [{"role": "system", "content": messages_builder()}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_payload})
-    return await _ask_gpt(messages)
-
 async def _ask_gpt_main(history: List[Dict[str, str]], user_payload: str) -> str:
     messages = [{"role": "system", "content": build_system_prompt()}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_payload})
-    return await _ask_gpt(messages)
+    return await _openai_chat(messages)
 
 async def _ask_gpt_followup(history: List[Dict[str, str]], user_payload: str) -> str:
     messages = [{"role": "system", "content": build_followup_prompt()}]
@@ -752,7 +745,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2) Якщо прийшов JSON повного замовлення — парсимо, рахуємо, рендеримо
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
-        # антидубль: однаковий «підпис» замовлення
         current_sig = _order_signature(parsed)
         if last_sig and current_sig == last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC):
             if not is_ack_only(raw_user_message):
@@ -834,7 +826,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(formatted)
         return
 
-    # 5) Якщо бракує лише пункту 4 — пробуємо «force point 4» (з урахуванням цитати)
+    # 5) Якщо бракує лише пункту 4 — пробуємо «force point 4»
     if missing_points_from_reply(reply_text) == {4}:
         force_json = await _ask_gpt_force_point4(history, user_payload)
         forced = try_parse_order_json(force_json)
