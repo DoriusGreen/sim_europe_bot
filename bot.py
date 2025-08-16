@@ -925,7 +925,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=ORDER_FORWARD_CHAT_ID,
-                    text=f"🔔 Нове замовлення\n\n{summary}"
+                    text=summary
                 )
             except Exception as e:
                 logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
