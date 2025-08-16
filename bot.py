@@ -79,6 +79,7 @@ DIAL_CODES = {
     "ЧЕХІЯ": "+420",
     "МОЛДОВА": "+373",
     "КАЗАХСТАН": "+7",
+    "США": "+1",  # додано
 }
 
 def normalize_country(name: str) -> str:
@@ -110,12 +111,12 @@ def canonical_operator_any(op: Optional[str]) -> Optional[str]:
         return None
     o = op.strip().lower()
     mapping = {
-        "o2": ["o2","о2"],
+        "O2": ["o2","о2"],
         "Lebara": ["lebara","лебара"],
         "Vodafone": ["vodafone","водафон","водофон"],
         "Movistar": ["movistar","мовістар","мовистар"],
         "Lycamobile": ["lycamobile","lyca","lyka","лайкамобайл","лайка"],
-        "T-mobile": ["t-mobile","t mobile","t-mobile","t–mobile","т-мобайл","т мобайл","tmobile","tмобайл"],
+        "T-mobile": ["t-mobile","t mobile","т-мобайл","т мобайл","tmobile","tмобайл"],
         "Kaktus": ["kaktus","кактус"],
     }
     for canon, alts in mapping.items():
@@ -165,7 +166,6 @@ def available_list_text() -> str:
     return ", ".join(names[:-1]) + " та " + names[-1]
 
 def render_prices(countries: List[str]) -> str:
-    # Рендеримо ТІЛЬКИ запитані та доступні країни; без fallback на «всі».
     blocks = []
     for c in countries:
         key = normalize_country(c).upper()
@@ -400,50 +400,56 @@ USSD_DATA: Dict[str, List[Tuple[Optional[str], str]]] = {
     "ЧЕХІЯ": [("T-mobile", "*101#"), ("Kaktus", "*103#")],
     "МОЛДОВА": [(None, "*444# (потім 3)")],
     "КАЗАХСТАН": [(None, "*120#")],
+    # США — навмисно відсутні коди: буде застосовано фолбек нижче
 }
 
+FALLBACK_PLASTIC_MSG = "Номер вказаний на пластику сім-карти"
+
 def render_ussd_targets(targets: List[Dict[str, str]]) -> str:
-    """Строге форматування USSD-відповіді."""
-    # групуємо за країною в порядку вхідних таргетів
+    """Строге форматування USSD-відповіді з фолбеком, якщо коду немає."""
     result_lines: List[str] = []
-    seen_countries: Set[str] = set()
 
     for t in targets:
         country = normalize_country(t.get("country", "")).upper()
-        if not country or country not in USSD_DATA:
+        if not country:
             continue
-        if country in seen_countries:
-            # якщо одна й та сама країна повторилась із різними операторами — обробимо в одному блоці нижче
-            pass
-        seen_countries.add(country)
 
-        # Вибраний оператор?
         op_req = canonical_operator_any(t.get("operator"))
-        pairs = USSD_DATA[country]
-        # Фільтр по оператору (якщо вказаний)
-        if op_req:
+
+        # Базові атрибути рядка
+        code_prefix = DIAL_CODES.get(country, "")
+        flag = FLAGS.get(country, "")
+        disp = DISPLAY.get(country, country.title())
+
+        pairs = USSD_DATA.get(country, [])
+        # Якщо є конкретний оператор — фільтруємо; якщо після фільтру пусто, спрацює фолбек
+        if op_req and pairs:
             pairs = [p for p in pairs if (p[0] and canonical_operator_any(p[0]) == op_req)]
 
-        # Рендер
-        block: List[str] = []
-        for op, code in pairs:
-            code_prefix = DIAL_CODES.get(country, "")
-            flag = FLAGS.get(country, "")
-            disp = DISPLAY.get(country, country.title())
-
-            if op and code.startswith("*"):
-                block.append(f"{code_prefix} {flag} {disp} (оператор {op}) — {code}")
-            elif op and not code.startswith("*"):
-                # особливий випадок O2: пояснення замість коду
-                block.append(f"{code_prefix} {flag} {disp} (оператор {op}) — {code}")
+        if not pairs:
+            # ФОЛБЕК: коли країни/оператора немає у таблиці — не вигадуємо коди
+            if op_req:
+                result_lines.append(f"{code_prefix} {flag} {disp} (оператор {op_req}) — {FALLBACK_PLASTIC_MSG}")
             else:
-                # коли оператора немає (Казахстан, Молдова)
-                block.append(f"{code_prefix} {flag} {disp} — {code}")
+                result_lines.append(f"{code_prefix} {flag} {disp} — {FALLBACK_PLASTIC_MSG}")
+            # Переходимо до наступної країни
+            continue
 
-        if block:
-            if result_lines:
-                result_lines.append("")  # порожній рядок між країнами
-            result_lines.extend(block)
+        # Інакше — рендеримо всі наявні коди
+        for op, code in pairs:
+            if op and code.startswith("*"):
+                result_lines.append(f"{code_prefix} {flag} {disp} (оператор {op}) — {code}")
+            elif op and not code.startswith("*"):
+                result_lines.append(f"{code_prefix} {flag} {disp} (оператор {op}) — {code}")
+            else:
+                result_lines.append(f"{code_prefix} {flag} {disp} — {code}")
+
+        # Порожній рядок між країнами
+        result_lines.append("")
+
+    # Приберемо останній зайвий розрив, якщо є
+    while result_lines and result_lines[-1] == "":
+        result_lines.pop()
 
     return "\n".join(result_lines).strip()
 
@@ -745,15 +751,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(US_ACTIVATION_MSG)
             usa_activation_sent = True
 
-        # 3b) Фоллоу-ап: просимо GPT. Якщо він повертає USSD JSON — рендеримо комбінації в строгому форматі.
+        # 3b) Фоллоу-ап: якщо GPT повернув USSD JSON — рендеримо; інакше коротка відповідь.
         follow = await _ask_gpt_followup(history, user_message)
         ussd_targets = try_parse_ussd_json(follow)
         if ussd_targets:
-            formatted = render_ussd_targets(ussd_targets)
-            if formatted:
-                history.append({"role": "assistant", "content": formatted})
-                _prune_history(history)
-                await msg.reply_text(formatted)
+            formatted = render_ussd_targets(ussd_targets) or FALLBACK_PLASTIC_MSG
+            history.append({"role": "assistant", "content": formatted})
+            _prune_history(history)
+            await msg.reply_text(formatted)
             return
         if is_meaningful_followup(follow):
             if not (usa_activation_sent and contains_us_activation_block(follow)):
@@ -762,16 +767,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(follow)
         return
 
-    # 4) Якщо GPT одразу повернув USSD JSON — рендеримо
+    # 4) Якщо GPT одразу повернув USSD JSON — рендеримо (з фолбеком), щоб не відправляти «сирий» JSON
     ussd_targets = try_parse_ussd_json(reply_text)
     if ussd_targets:
-        formatted = render_ussd_targets(ussd_targets)
-        if formatted:
-            history.append({"role": "user", "content": user_message})
-            history.append({"role": "assistant", "content": formatted})
-            _prune_history(history)
-            await msg.reply_text(formatted)
-            return
+        formatted = render_ussd_targets(ussd_targets) or FALLBACK_PLASTIC_MSG
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": formatted})
+        _prune_history(history)
+        await msg.reply_text(formatted)
+        return
 
     # 5) Якщо бракує лише пункту 4 — пробуємо «force point 4»
     if missing_points_from_reply(reply_text) == {4}:
