@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import json
 import re
 
-from telegram import Update
+from telegram import Update, Message
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import openai
 
@@ -447,6 +447,18 @@ def render_ussd_targets(targets: List[Dict[str, str]]) -> str:
 
     return "\n".join(result_lines).strip()
 
+# ==== Додатково: витяг процитованого тексту ====
+def extract_quoted_text(message: Optional[Message]) -> Optional[str]:
+    """Якщо користувач відповів (reply) на старе повідомлення з даними — повертаємо текст цитати."""
+    if not message:
+        return None
+    rt = message.reply_to_message
+    if not rt:
+        return None
+    # беремо текст або підпис до медіа
+    text = (rt.text or rt.caption or "").strip()
+    return text or None
+
 # ==== СИСТЕМНІ ПРОМПТИ ====
 def build_system_prompt() -> str:
     return (
@@ -454,6 +466,9 @@ def build_system_prompt() -> str:
         "Ти — дружелюбний і корисний Telegram-бот-магазин SIM-карт. Чітко та суворо дотримуйся прописаних інструкцій, якщо щось не зрозуміло, то не вигадуй, а краще перепитай клієнта що він мав на увазі.\n"
         "На початку чату клієнт уже отримує від акаунта власника перелік країн у наявності та інформацію для доставки — ти це НЕ ДУБЛЮЄШ.\n"
         "Не надсилай прайси чи чек-лист автоматично; роби це лише коли користувач прямо просить або вже надіслав хоча б один із пунктів замовлення.\n\n"
+
+        # === РОБОТА З ПРОЦИТОВАНИМИ (REPLY) ПОВІДОМЛЕННЯМИ ===
+        "Якщо поточне повідомлення є відповіддю (reply) на інше — вважай текст процитованого повідомлення частиною актуальних даних і використовуй його для заповнення пунктів 1–4, якщо це доречно. Не ігноруй цитату.\n\n"
 
         # === СТРУКТУРА ЗАМОВЛЕННЯ (4 ПУНКТИ) ===
         "ПОВНЕ замовлення складається з 4 пунктів:\n"
@@ -512,6 +527,11 @@ def build_system_prompt() -> str:
         "• Якщо клієнт для Англії називає оператора (O2, Lebara, Vodafone) — додай поле \"operator\" з канонічним значенням; інакше — не додавай це поле.\n"
         "• Текстові кількості (пара/десяток/кілька) перетворюй у число або попроси уточнення через пункт 4.\n\n"
 
+        # === ЕСКАЛАЦІЯ ДО ЛЮДИНИ (МЕНЕДЖЕРА) ===
+        "Якщо користувач пише «зв’язатися з людиною/менеджером/оператором» або схоже — за замовчуванням мається на увазі зв’язок із МЕНЕДЖЕРОМ магазину, а НЕ дзвінки через SIM. "
+        "В такому випадку відповідай коротко: «Якщо потрібна додаткова допомога або хочете зв'язатися з менеджером — очікуйте відповіді менеджера.» "
+        "Лише якщо користувач ЯВНО просить про дзвінки через SIM (наприклад «як подзвонити з цієї сімки») — тоді розповідай про поповнення/дзвінки.\n\n"
+
         # === ПІСЛЯ JSON ===
         "Після JSON бекенд сам рахує суми та формує підсумок. «Загальна сумма» показується лише якщо країн 2+.\n\n"
 
@@ -561,6 +581,8 @@ def build_followup_prompt() -> str:
         "Відповідай КОРОТКО на інші частини останнього повідомлення, що НЕ стосуються вже надісланих даних.\n\n"
         "Якщо користувач просив ЛИШЕ ціну/вартість/прайс і нічого більше — поверни порожній рядок. "
         "НЕ пиши підтвердження наявності («підтверджую наявність», «є в наявності», «available»).\n\n"
+        "Якщо користувач просить «зв’язатися з людиною/менеджером/оператором» — це звернення до МЕНЕДЖЕРА. Відповідай: «Очікуйте відповіді менеджера.» "
+        "Лише якщо явно питають про дзвінки через SIM — пояснюй про поповнення/дзвінки.\n\n"
         "Якщо користувач питає, як дізнатися/перевірити свій номер — ВІДПОВІДАЙ ЛИШЕ JSON:\n"
         "{\n"
         '  "ask_ussd": true,\n'
@@ -574,6 +596,7 @@ def build_force_point4_prompt() -> str:
     return (
         "Ти — той самий бот. У контексті вже є пункти 1–3 (ПІБ, телефон, місто+№). "
         "Останнє повідомлення користувача ймовірно містить лише пункт 4 (країни та кількість sim-карт) у довільному порядку. "
+        "Також, якщо користувач відповів на старе повідомлення (reply), вважай текст процитованого повідомлення частиною актуальних даних. "
         "Твоє завдання — витягти пункт 4, поєднати з пунктами 1–3 з контексту і ПОВЕРНУТИ ЛИШЕ ПОВНИЙ JSON замовлення."
     )
 
@@ -637,17 +660,23 @@ async def _ask_gpt(messages: List[Dict[str, str]]) -> str:
         logger.error(f"Помилка при зверненні до OpenAI: {e}")
         return "Вибачте, сталася технічна помилка. Спробуйте, будь ласка, ще раз."
 
-async def _ask_gpt_main(history: List[Dict[str, str]], user_message: str) -> str:
-    messages = [{"role": "system", "content": build_system_prompt()}]
+async def _ask_gpt(messages_builder, history: List[Dict[str, str]], user_payload: str) -> str:
+    messages = [{"role": "system", "content": messages_builder()}]
     messages.extend(history)
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": user_payload})
     return await _ask_gpt(messages)
 
-async def _ask_gpt_followup(history: List[Dict[str, str]], user_message: str) -> str:
+async def _ask_gpt_main(history: List[Dict[str, str]], user_payload: str) -> str:
+    messages = [{"role": "system", "content": build_system_prompt()}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_payload})
+    return await _ask_gpt(messages)
+
+async def _ask_gpt_followup(history: List[Dict[str, str]], user_payload: str) -> str:
     messages = [{"role": "system", "content": build_followup_prompt()}]
     tail = history[-4:] if len(history) > 4 else history[:]
     messages.extend(tail)
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": user_payload})
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
@@ -660,10 +689,10 @@ async def _ask_gpt_followup(history: List[Dict[str, str]], user_message: str) ->
         logger.error(f"Помилка follow-up до OpenAI: {e}")
         return ""
 
-async def _ask_gpt_force_point4(history: List[Dict[str, str]], user_message: str) -> str:
+async def _ask_gpt_force_point4(history: List[Dict[str, str]], user_payload: str) -> str:
     messages = [{"role": "system", "content": build_force_point4_prompt()}]
     messages.extend(history)
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": user_payload})
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
@@ -693,18 +722,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("No effective_message in update: %s", update)
         return
 
-    user_message = msg.text.strip() if msg.text else ""
+    raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
+
+    # Додаємо процитований текст (reply) як частину корисного навантаження до GPT
+    quoted_text = extract_quoted_text(msg)
+    user_payload = raw_user_message
+    if quoted_text:
+        user_payload = (
+            raw_user_message
+            + "\n\n[ЦЕ ПРОЦИТОВАНЕ ПОВІДОМЛЕННЯ КЛІЄНТА (вважай частиною актуальних даних):]\n"
+            + quoted_text
+        )
 
     # --- (A) Якщо щойно було оформлено замовлення і користувач пише «Ок/Дякую/Жду» — не дублюємо підсумок
     last_sig = context.chat_data.get("last_order_sig")
     last_time = context.chat_data.get("last_order_time", 0)
-    if last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC) and is_ack_only(user_message):
+    if last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC) and is_ack_only(raw_user_message):
         await msg.reply_text("Дякуємо! Замовлення вже в роботі 😊")
         return
 
     # 1) Основний виклик GPT
-    reply_text = await _ask_gpt_main(history, user_message)
+    reply_text = await _ask_gpt_main(history, user_payload)
 
     # Уніфікуємо заголовок, якщо модель забула емодзі
     if "Залишилось вказати:" in reply_text and "📝 Залишилось вказати:" not in reply_text:
@@ -713,20 +752,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2) Якщо прийшов JSON повного замовлення — парсимо, рахуємо, рендеримо
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
-        # антидубль: однуковий «підпис» замовлення
+        # антидубль: однаковий «підпис» замовлення
         current_sig = _order_signature(parsed)
         if last_sig and current_sig == last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC):
-            # не дублюємо підсумок, відповідаємо коротко лише якщо це не порожнє «Ок»
-            if not is_ack_only(user_message):
+            if not is_ack_only(raw_user_message):
                 await msg.reply_text("Замовлення вже прийнято, дякуємо! Якщо буде ще щось — пишіть 🙂")
             return
 
         summary = render_order(parsed)
-        # зберігаємо підпис і час
         context.chat_data["last_order_sig"] = current_sig
         context.chat_data["last_order_time"] = time.time()
 
-        history.append({"role": "user", "content": user_message})
+        history.append({"role": "user", "content": raw_user_message})
         history.append({"role": "assistant", "content": summary})
         _prune_history(history)
 
@@ -745,13 +782,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if want_all:
             price_msg = "".join(render_price_block(k) for k in PRICE_TIERS.keys())
-            history.append({"role": "user", "content": user_message})
+            history.append({"role": "user", "content": raw_user_message})
             history.append({"role": "assistant", "content": price_msg})
             _prune_history(history)
             await msg.reply_text(price_msg)
         elif valid:
             price_msg = render_prices(valid)
-            history.append({"role": "user", "content": user_message})
+            history.append({"role": "user", "content": raw_user_message})
             history.append({"role": "assistant", "content": price_msg})
             _prune_history(history)
             await msg.reply_text(price_msg)
@@ -759,20 +796,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(render_unavailable(invalid))
         else:
             unavailable_msg = render_unavailable(invalid if invalid else price_countries)
-            history.append({"role": "user", "content": user_message})
+            history.append({"role": "user", "content": raw_user_message})
             history.append({"role": "assistant", "content": unavailable_msg})
             _prune_history(history)
             await msg.reply_text(unavailable_msg)
 
         # 3a) США — надіслати інструкцію, якщо питали саме про США
-        usa_intent = (("США" in valid) and (len(valid) == 1 or user_mentions_usa(user_message)))
+        usa_intent = (("США" in valid) and (len(valid) == 1 or user_mentions_usa(raw_user_message)))
         usa_activation_sent = False
         if usa_intent:
             await msg.reply_text(US_ACTIVATION_MSG)
             usa_activation_sent = True
 
         # 3b) Фоллоу-ап: якщо GPT повернув USSD JSON — рендеримо; інакше коротка відповідь.
-        follow = await _ask_gpt_followup(history, user_message)
+        follow = await _ask_gpt_followup(history, user_payload)
         ussd_targets = try_parse_ussd_json(follow)
         if ussd_targets:
             formatted = render_ussd_targets(ussd_targets) or FALLBACK_PLASTIC_MSG
@@ -791,15 +828,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ussd_targets = try_parse_ussd_json(reply_text)
     if ussd_targets:
         formatted = render_ussd_targets(ussd_targets) or FALLBACK_PLASTIC_MSG
-        history.append({"role": "user", "content": user_message})
+        history.append({"role": "user", "content": raw_user_message})
         history.append({"role": "assistant", "content": formatted})
         _prune_history(history)
         await msg.reply_text(formatted)
         return
 
-    # 5) Якщо бракує лише пункту 4 — пробуємо «force point 4»
+    # 5) Якщо бракує лише пункту 4 — пробуємо «force point 4» (з урахуванням цитати)
     if missing_points_from_reply(reply_text) == {4}:
-        force_json = await _ask_gpt_force_point4(history, user_message)
+        force_json = await _ask_gpt_force_point4(history, user_payload)
         forced = try_parse_order_json(force_json)
         if forced and forced.items and forced.full_name and forced.phone and forced.city and forced.np:
             current_sig = _order_signature(forced)
@@ -808,7 +845,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.chat_data["last_order_sig"] = current_sig
                 context.chat_data["last_order_time"] = time.time()
 
-                history.append({"role": "user", "content": user_message})
+                history.append({"role": "user", "content": raw_user_message})
                 history.append({"role": "assistant", "content": summary})
                 _prune_history(history)
                 await msg.reply_text(summary)
@@ -816,7 +853,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # 6) Інакше — звичайна відповідь моделі (включно з 🛒/📝/FAQ)
-    history.append({"role": "user", "content": user_message})
+    history.append({"role": "user", "content": raw_user_message})
     history.append({"role": "assistant", "content": reply_text})
     _prune_history(history)
     await msg.reply_text(reply_text)
