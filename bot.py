@@ -31,7 +31,7 @@ MAX_TURNS = 15
 ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
 
 # ==== КУДА ДУБУЮ Є ЗАМОВЛЕННЯ (ГРУПА) ====
-ORDER_FORWARD_CHAT_ID = int(os.getenv("ORDER_FORWARD_CHAT_ID", "-4832242322"))
+ORDER_FORWARD_CHAT_ID = int(os.getenv("ORDER_FORWARD_CHAT_ID", "-1003062477534"))
 
 # ==== Ігнор/врахування повідомлень менеджера ====
 def _parse_ids(env: Optional[str]) -> Set[int]:
