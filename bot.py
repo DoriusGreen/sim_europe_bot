@@ -75,7 +75,7 @@ def _is_manager_message(msg: Message) -> bool:
         return False
     if MANAGER_USER_IDS and u.id in MANAGER_USER_IDS:
         return True
-    if MANAGER_USERNAMES and u.username and u.username.lower().lstrip("@") in MANAGER_USERNAMES:
+    if MANAGER_USERNAMES and u.username and u.username.lower() in MANAGER_USERNAMES:
         return True
     return False
 
@@ -363,29 +363,6 @@ def render_order(order: OrderData) -> str:
     footer = f"Загальна сумма: {grand_total} грн\n" if counted_countries >= 2 else ""
     return header + body + footer
 
-# ==== ВАРІАНТ РЕНДЕРА ДЛЯ «ОПЛАЧЕНО» ====
-def render_order_paid_variant(order: OrderData, paid: bool) -> str:
-    if not paid:
-        return render_order(order)
-    lines = []
-    for it in order.items:
-        c_norm = normalize_country(it.country)
-        disp_base = DISPLAY.get(c_norm, it.country.strip().title())
-        op = canonical_operator(getattr(it, "operator", None))
-        op_suf = f" (оператор {op})" if (op and c_norm == "ВЕЛИКОБРИТАНІЯ") else ""
-        disp = disp_base + op_suf
-        flag = FLAGS.get(c_norm, "")
-        # Замість ціни — в дужках помітка
-        lines.append(f"{flag} {disp}, {it.qty} шт (замовлення оплачене)  \n")
-    header = (
-        f"{format_full_name(order.full_name)} \n"
-        f"{format_phone(order.phone)}\n"
-        f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
-    )
-    body = "".join(lines) + "\n"
-    # Без «Загальна сумма»
-    return header + body
-
 # ==== JSON парсери ====
 ORDER_JSON_RE = re.compile(r"\{[\s\S]*\}")
 PRICE_JSON_RE = re.compile(r"\{[\s\S]*\}")
@@ -555,9 +532,9 @@ COUNTRY_KEYWORDS: Dict[str, List[str]] = {
     "ІСПАНІЯ": ["іспан", "испан", "spain", "+34"],
     "НІМЕЧЧИНА": ["німеч", "герман", "german", "+49", "deutsch"],
     "НІДЕРЛАНДИ": ["нідерлан", "голланд", "holland", "nether", "+31"],
-    "ІТАЛІЯ": ["італ", "ital", "+39"],
+    "ІТАЛІЯ": ["італ", "итал", "ital", "+39"],
     "ЧЕХІЯ": ["чех", "czech", "+420"],
-    "ПОЛЬЩА": ["польщ", "poland"],
+    "ПОЛЬЩА": ["польщ", "польш", "poland"],
     "ЛИТВА": ["литв", "lithuan"],
     "ЛАТВІЯ": ["латв", "latvia"],
     "КАЗАХСТАН": ["казах", "kazakh", "+7"],
@@ -586,6 +563,7 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
     """Повертає список (CANON_COUNTRY, qty), якщо в одному повідомленні видно і країни, і кількості."""
     if not text:
         return []
+    lows = text.lower()
     mentions = _country_mentions_with_pos(text)
     if not mentions:
         return []
@@ -650,11 +628,7 @@ def build_system_prompt() -> str:
         "<залиши лише відсутні рядки з їхніми номерами, напр.>\n"
         "2. Номер телефону.\n"
         "4. Країна(и) та кількість sim-карт.\n\n"
-        "Якщо жодного пункту ще не виявлено, відповідай як на звичайне запитання, без чек-листа.\n"
-        "Показуй чек-лист «📝 Залишилось вказати…» ТІЛЬКИ якщо поточне повідомлення користувача містить або уточнює хоч один із пунктів 1–4 (ПІБ, телефон, місто+№, країни/кількість).\n"
-        "Якщо повідомлення — звичайне запитання/обговорення і НЕ додає даних до пунктів 1–4 — просто відповідай по суті і НЕ показуй чек-лист.\n"
-        "Не дублюй той самий чек-лист двічі підряд: повторюй його лише якщо перелік відсутніх пунктів ЗМІНИВСЯ або користувач прямо попросив «що ще треба?» / «що залишилось?»\n\n"
-
+        "Якщо жодного пункту ще не виявлено, відповідай як на звичайне запитання, без чек-листа.\n\n"
 
         # === ФОРМАТ JSON ДЛЯ БЕКЕНДА ===
         "Коли ВСІ дані є — ВІДПОВІДАЙ ЛИШЕ JSON за схемою (без підсумку, без зайвого тексту):\n"
@@ -724,6 +698,8 @@ def build_system_prompt() -> str:
         "Зазвичай накладений платіж. За бажанням — карта або USDT (TRC-20).\n\n"
         "Чи можлива відправка в інші країни?\n"
         "Так, від 3 шт, повна передоплата, «Нова Пошта».\n\n"
+        "Який оператор для конкретної країни?\n"
+        "Ти не пропонуєш операторів сам, тільки відповідаєш, коли клієнт сам конкретно запитує про оператора для країни. Якщо клієнт запитує про неіснуючого оператора для країни (наприклад, Vodafone для Німеччини, але є тільки Lebara), скажи, що в роботі оператор Lebara (або той, що є) нічим не відрізняється. Оператори для країн: Нідерланди - Lebara; Франція - Lebara; Іспанія - Lebara; Чехія - T-Mobile та Kaktus; Польща - Play (але потрібно уточнити у менеджера); Литва - Labas; Казахстан - Tele2; США - Lycamobile.\n\n"
 
         # === США — ОСОБЛИВО ===
         "США — на відміну від інших, потребують поповнення для активації. Після поповнення SIM працюватиме на прийом SMS.\n\n"
@@ -796,97 +772,6 @@ def _prune_history(history: List[Dict[str, str]]) -> None:
     if len(history) > MAX_TURNS * 2:
         del history[: len(history) - MAX_TURNS * 2]
 
-# ==== УТИЛІТИ ДЛЯ ГРУПИ ЗАМОВЛЕНЬ ====
-PHONE_RE = re.compile(r"(?:\+?38)?0\d{9}")
-CITY_NP_RE = re.compile(r"^\s*([A-Za-zА-Яа-яІіЇїЄє' .-]+)\s*(?:№|#|N|No|№\.)\s*(\d{1,5})\s*$", re.IGNORECASE)
-
-def _find_phone(lines: List[str]) -> Optional[str]:
-    for ln in lines:
-        m = PHONE_RE.search(ln.replace(" ", ""))
-        if m:
-            return m.group(0)
-    return None
-
-def _find_city_np(lines: List[str]) -> Optional[Tuple[str, str]]:
-    for ln in lines:
-        m = CITY_NP_RE.match(ln)
-        if m:
-            return m.group(1).strip(), m.group(2).strip()
-    # Фолбек: шукаємо «місто ... № N» усередині
-    joined = " ".join(lines)
-    m = re.search(r"([A-Za-zА-Яа-яІіЇїЄє' .-]+)\s*(?:№|#|N|No|№\.)\s*(\d{1,5})", joined, re.IGNORECASE)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    return None
-
-def _find_name(lines: List[str], phone: Optional[str], city: Optional[str]) -> Optional[str]:
-    def is_name_line(ln: str) -> bool:
-        if any(tok in ln.lower() for tok in ["шт", "sim", "сим", "безнал", "без нал", "оплач", "№", "#", "no", "n "]):
-            return False
-        if re.search(r"\d", ln):
-            return False
-        return True
-    for ln in lines:
-        if phone and phone in ln.replace(" ", ""):
-            continue
-        if city and city.lower() in ln.lower():
-            continue
-        if is_name_line(ln):
-            return ln.strip()
-    # Фолбек — перший рядок
-    return lines[0].strip() if lines else None
-
-def parse_manager_group_order(text: str) -> Optional[Tuple[OrderData, bool]]:
-    """Парсить повідомлення менеджера у групі в структуру замовлення + прапорець «оплачено»."""
-    if not text:
-        return None
-    paid = bool(re.search(r"\b(без\s*нал|безнал|оплачено|оплата\s*(пройшла|є)?)\b", text, re.IGNORECASE))
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if not lines:
-        return None
-
-    # Пункт 4: країни та кількості
-    items_found = detect_point4_items(text)
-    items: List[OrderItem] = []
-    for country_key, qty in items_found:
-        items.append(OrderItem(country=country_key, qty=max(1, int(qty))))
-
-    # Мінімум одна позиція
-    if not items:
-        # Спроба парсити «10 шт англія» формою
-        m = re.search(r"(\d{1,4})\s*(?:шт|сим|sim)\s+([A-Za-zА-Яа-яІіЇїЄє+ .-]+)", text, re.IGNORECASE)
-        if m:
-            qty = int(m.group(1))
-            country_raw = m.group(2).strip()
-            items.append(OrderItem(country=normalize_country(country_raw), qty=max(1, qty)))
-        else:
-            return None
-
-    # Телефон
-    phone_raw = _find_phone(lines)
-    if not phone_raw:
-        return None
-
-    # Місто + №
-    city_np = _find_city_np(lines)
-    if not city_np:
-        return None
-    city_raw, np_raw = city_np
-
-    # Ім’я
-    name_raw = _find_name(lines, phone=phone_raw, city=city_raw)
-    if not name_raw:
-        return None
-
-    od = OrderData(
-        full_name=name_raw,
-        phone=phone_raw,
-        city=city_raw,
-        np=np_raw,
-        items=items
-    )
-    return od, paid
-
 # ==== OpenAI ====
 async def _openai_chat(messages: List[Dict[str, str]]) -> str:
     try:
@@ -940,27 +825,6 @@ async def _ask_gpt_force_point4(history: List[Dict[str, str]], user_payload: str
         logger.error(f"Помилка force-point4 до OpenAI: {e}")
         return ""
 
-def _is_owner_in_order_group(msg: Message) -> bool:
-    try:
-        if not msg or not msg.chat:
-            return False
-        if int(msg.chat.id) != int(ORDER_FORWARD_CHAT_ID):
-            return False
-        u = msg.from_user
-        if not u:
-            return False
-        owner_un = (DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()
-        if u.username and u.username.strip().lstrip("@").lower() == owner_un:
-            return True
-        if DEFAULT_OWNER_USER_ID:
-            try:
-                return int(u.id) == int(DEFAULT_OWNER_USER_ID)
-            except Exception:
-                pass
-        return False
-    except Exception:
-        return False
-
 # ===== /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -981,28 +845,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
 
-    # ---- НОВЕ: спеціальна логіка для групи замовлень, коли пише @Sim_Card_Three
-    if _is_owner_in_order_group(msg) and raw_user_message:
-        parsed = parse_manager_group_order(raw_user_message)
-        if parsed:
-            order_data, paid = parsed
-            formatted = render_order_paid_variant(order_data, paid)
-            # намагаємось видалити оригінальне повідомлення менеджера
-            try:
-                await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
-            except Exception as e:
-                logger.warning(f"Не вдалося видалити повідомлення менеджера: {e}")
-            # публікуємо структурований підсумок у групу
-            try:
-                await context.bot.send_message(chat_id=ORDER_FORWARD_CHAT_ID, text=formatted)
-            except Exception as e:
-                logger.warning(f"Не вдалося надіслати структуроване замовлення: {e}")
-            return
-        # Якщо не вдалося розпарсити — НЕ видаляємо, йдемо далі (можливо, це не замовлення)
-
     # Якщо пише менеджер — НЕ відповідаємо, але додаємо в history як контекст
-    # (виняток для групи вище вже оброблено)
-    if _is_manager_message(msg) and (not msg.chat or int(msg.chat.id) != int(ORDER_FORWARD_CHAT_ID)):
+    if _is_manager_message(msg):
         text = (msg.text or msg.caption or "").strip()
         if text:
             history.append({"role": "assistant", "content": f"[Менеджер] {text}"})
