@@ -161,7 +161,7 @@ def normalize_country(name: str) -> str:
         return "МОЛДОВА"
     return n
 
-# ---------- ОПЕРАТОРИ ДЛЯ АНГЛІЇ (для замовлення) ----------
+# ---------- ОПЕРАТОРИ ДЛЯ АНГЛІ Ї (для замовлення) ----------
 def canonical_operator(op: Optional[str]) -> Optional[str]:
     if not op:
         return None
@@ -864,11 +864,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception as e:
                     logger.warning(f"Не вдалося видалити оригінальне повідомлення: {e}")
-                return
             else:
-                # Якщо не вдалося спарсити — не робимо нічого (або можна додати лог/повідомлення)
-                logger.info(f"Не вдалося спарсити дані від менеджера в групі: {raw_text}")
-                return  # Додаємо return тут, щоб не продовжувати
+                # Якщо не вдалося спарсити, перевіряємо, чи це повідомлення про бракуючі дані
+                if "Залишилось вказати" in reply_text:
+                    await context.bot.send_message(
+                        chat_id=ORDER_FORWARD_CHAT_ID,
+                        text=reply_text,
+                        reply_to_message_id=msg.message_id
+                    )
+                else:
+                    logger.info(f"Не вдалося спарсити дані від менеджера в групі: {raw_text}")
         return
 
     # ПОТОЧНА ЛОГІКА ДЛЯ КЛІЄНТСЬКИХ ЧАТІВ (залишається без змін)
