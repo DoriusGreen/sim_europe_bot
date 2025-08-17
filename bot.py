@@ -868,14 +868,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 # Якщо не вдалося спарсити — не робимо нічого (або можна додати лог/повідомлення)
                 logger.info(f"Не вдалося спарсити дані від менеджера в групі: {raw_text}")
+                return  # Додаємо return тут, щоб не продовжувати
         return
 
     # ПОТОЧНА ЛОГІКА ДЛЯ КЛІЄНТСЬКИХ ЧАТІВ (залишається без змін)
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
 
-    # Якщо пише менеджер — НЕ відповідаємо, але додаємо в history як контекст
-    if _is_manager_message(msg):
+    # Якщо пише менеджер (але не в групі) — НЕ відповідаємо, але додаємо в history як контекст
+    if _is_manager_message(msg) and msg.chat_id != ORDER_FORWARD_CHAT_ID:
         text = (msg.text or msg.caption or "").strip()
         if text:
             history.append({"role": "assistant", "content": f"[Менеджер] {text}"})
