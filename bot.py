@@ -842,6 +842,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("No effective_message in update: %s", update)
         return
 
+    # НОВА ЛОГІКА: Якщо це група і повідомлення від менеджера — парсимо як дані замовлення
+    if msg.chat_id == ORDER_FORWARD_CHAT_ID and _is_manager_message(msg):
+        raw_text = msg.text.strip() if msg.text else ""
+        if raw_text:
+            # Використовуємо GPT для парсингу тексту в JSON (без історії, бо це разовий парсинг)
+            reply_text = await _ask_gpt_main([], raw_text)  # Порожня історія
+            parsed = try_parse_order_json(reply_text)
+            if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
+                summary = render_order(parsed)
+                # Відправляємо структуроване замовлення в групу
+                await context.bot.send_message(
+                    chat_id=ORDER_FORWARD_CHAT_ID,
+                    text=summary
+                )
+                # Видаляємо оригінальне повідомлення менеджера
+                try:
+                    await context.bot.delete_message(
+                        chat_id=ORDER_FORWARD_CHAT_ID,
+                        message_id=msg.message_id
+                    )
+                except Exception as e:
+                    logger.warning(f"Не вдалося видалити оригінальне повідомлення: {e}")
+                return
+            else:
+                # Якщо не вдалося спарсити — не робимо нічого (або можна додати лог/повідомлення)
+                logger.info(f"Не вдалося спарсити дані від менеджера в групі: {raw_text}")
+        return
+
+    # ПОТОЧНА ЛОГІКА ДЛЯ КЛІЄНТСЬКИХ ЧАТІВ (залишається без змін)
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
 
