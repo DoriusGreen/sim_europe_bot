@@ -27,7 +27,7 @@ PORT = int(os.getenv("PORT", "8443"))
 openai.api_key = OPENAI_API_KEY
 
 # ==== Константи пам'яті/міток ====
-MAX_TURNS = 14
+MAX_TURNS = 15
 ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
 
 # ==== КУДА ДУБУЮ Є ЗАМОВЛЕННЯ (ГРУПА) ====
@@ -698,6 +698,8 @@ def build_system_prompt() -> str:
         "Зазвичай накладений платіж. За бажанням — карта або USDT (TRC-20).\n\n"
         "Чи можлива відправка в інші країни?\n"
         "Так, від 3 шт, повна передоплата, «Нова Пошта».\n\n"
+        "Який оператор для конкретної країни?\n"
+        "Ти не пропонуєш операторів сам, тільки відповідаєш, коли клієнт сам конкретно запитує про оператора для країни. Якщо клієнт запитує про неіснуючого оператора для країни (наприклад, Vodafone для Німеччини, але є тільки Lebara), скажи, що в роботі оператор Lebara (або той, що є) нічим не відрізняється. Оператори для країн: Нідерланди - Lebara; Франція - Lebara; Іспанія - Lebara; Чехія - T-Mobile та Kaktus; Польща - Play (але потрібно уточнити у менеджера); Литва - Labas; Казахстан - Tele2; США - Lycamobile.\n\n"
 
         # === США — ОСОБЛИВО ===
         "США — на відміну від інших, потребують поповнення для активації. Після поповнення SIM працюватиме на прийом SMS.\n\n"
@@ -923,9 +925,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ---> Дублікат у групу
             try:
+                username = update.effective_user.username
+                forward_text = f"@{username}\n{summary}" if username else summary
                 await context.bot.send_message(
                     chat_id=ORDER_FORWARD_CHAT_ID,
-                    text=summary
+                    text=forward_text
                 )
             except Exception as e:
                 logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
@@ -976,9 +980,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ---> Дублікат у групу
         try:
+            username = update.effective_user.username
+            forward_text = f"@{username}\n{summary}" if username else summary
             await context.bot.send_message(
                 chat_id=ORDER_FORWARD_CHAT_ID,
-                text=summary
+                text=forward_text
             )
         except Exception as e:
             logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
