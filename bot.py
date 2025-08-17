@@ -276,9 +276,7 @@ def format_phone(phone: str) -> str:
         digits = "0" + digits[3:]
     if len(digits) == 10:
         return f"{digits[0:3]} {digits[3:6]} {digits[6:10]}"
-    if len(digits) == 9 and digits.startswith("0"):
-        return f"{digits[0:3]} {digits[3:6]} {digits[6:9]}"
-    return re.sub(r"-", " ", (phone or "").strip())
+    return (phone or "").strip()
 
 def _split_city_extra(city: str):
     s = " ".join((city or "").split())
@@ -329,7 +327,7 @@ def _order_signature(order: OrderData) -> str:
     )
     return f"{format_full_name(order.full_name)}|{format_phone(order.phone)}|{format_city(order.city)}|{format_np(order.np)}|{items_sig}"
 
-def render_order(order: OrderData, paid: bool = False) -> str:
+def render_order(order: OrderData) -> str:
     lines = []
     grand_total = 0
     counted_countries = 0
@@ -342,17 +340,15 @@ def render_order(order: OrderData, paid: bool = False) -> str:
         disp = disp_base + op_suf
 
         flag = FLAGS.get(c_norm, "")
-        if paid:
-            line_total_str = "(замовлення оплачене)"
+        price = unit_price(c_norm, it.qty)
+
+        if price is None:
+            line_total_str = "договірна"
         else:
-            price = unit_price(c_norm, it.qty)
-            if price is None:
-                line_total_str = "договірна"
-            else:
-                line_total = price * it.qty
-                grand_total += line_total
-                counted_countries += 1
-                line_total_str = str(line_total)
+            line_total = price * it.qty
+            grand_total += line_total
+            counted_countries += 1
+            line_total_str = str(line_total)
 
         lines.append(ORDER_LINE.format(
             flag=flag, disp=disp, qty=it.qty, line_total=line_total_str
@@ -364,7 +360,7 @@ def render_order(order: OrderData, paid: bool = False) -> str:
         f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
     )
     body = "".join(lines) + "\n"
-    footer = f"Загальна сумма: {grand_total} грн\n" if counted_countries >= 2 and not paid else ""
+    footer = f"Загальна сумма: {grand_total} грн\n" if counted_countries >= 2 else ""
     return header + body + footer
 
 # ==== JSON парсери ====
@@ -625,7 +621,6 @@ def build_system_prompt() -> str:
         "4. Країна(и) та кількість sim-карт.\n\n"
 
         # === ЯК ПИТАТИ ПРО НЕСТАЧУ ДАНИХ ===
-        "Аналізуй кожне повідомлення на наявність елементів замовлення, але показуй чек-лист лише коли користувач саме дає/уточнює дані для замовлення!!!\n"
         "Пункт 4 може бути у довільній формі/порядку («Англія 2 шт», «дві UK», «UK x2» тощо). "
         "Якщо пункт 4 прийшов окремим повідомленням — поєднуй його з пунктами 1–3 з контексту.\n\n"
         "Якщо виявлено хоча б один пункт, але ще НЕ вказано ВСІ 4 — відповідай СУВОРО в такому вигляді (без зайвого тексту до/після):\n"
@@ -633,10 +628,7 @@ def build_system_prompt() -> str:
         "<залиши лише відсутні рядки з їхніми номерами, напр.>\n"
         "2. Номер телефону.\n"
         "4. Країна(и) та кількість sim-карт.\n\n"
-        "Якщо жодного пункту ще не виявлено, відповідай як на звичайне запитання, без чек-листа.\n"
-        "Якщо зібраний якийсь один пункт, але клієнт починає запитувати щось чи вести розмову про щось інше, то не потрібно дублювати повідомлення про нестачу даних, почекай поки клієнт сам не продовжить оформляти замовлення, або сам не запитає які дані ще потрібні.\n" 
-        "Якщо попереднє повідомлення від бота було чек-листом, а тепер користувач поставив інше запитання — відповідай стисло і НЕ повторюй чек-лист.\n\n"
-
+        "Якщо жодного пункту ще не виявлено, відповідай як на звичайне запитання, без чек-листа.\n\n"
 
         # === ФОРМАТ JSON ДЛЯ БЕКЕНДА ===
         "Коли ВСІ дані є — ВІДПОВІДАЙ ЛИШЕ JSON за схемою (без підсумку, без зайвого тексту):\n"
@@ -780,6 +772,157 @@ def _prune_history(history: List[Dict[str, str]]) -> None:
     if len(history) > MAX_TURNS * 2:
         del history[: len(history) - MAX_TURNS * 2]
 
+# ======== НОВЕ: допоміжні для групової обробки від @Sim_Card_Three ========
+PAID_HINT_RE = re.compile(r"\b(без\s*нал|безнал|оплачено|передоплат|оплата\s*на\s*карт[уі])\b", re.IGNORECASE)
+
+def _soft_phone_spaces(phone: str) -> str:
+    """
+    М'яко приводить телефон до пробілів: '098-666-777' -> '098 666 777'.
+    Якщо format_phone вже зробив 3-3-4 — залишає як є.
+    """
+    base = format_phone(phone)
+    # Якщо після format_phone лишились нецифрові роздільники — нормалізуємо їх у пробіли
+    cleaned = re.sub(r"[^\d]", " ", base)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned if cleaned else base.strip()
+
+def _parse_city_and_np(line: str) -> Tuple[str, str]:
+    """
+    Витягує місто та № НП з рядка.
+    Підтримує 'Київ № 377', 'Львів 377', 'Одеса No 12', 'Dnipro #45'
+    """
+    s = " ".join((line or "").split())
+    m = re.search(r"^(.*?)(?:\s*(?:№|#|no|n)\s*)?(\d{1,5})\s*$", s, flags=re.IGNORECASE)
+    if m:
+        city_raw = m.group(1).strip(" ,;-")
+        np_raw = m.group(2)
+        return format_city(city_raw), format_np(np_raw)
+    # fallback: останні цифри — номер відділення
+    m2 = re.search(r"(\d{1,5})(?!.*\d)", s)
+    if m2:
+        idx = m2.start()
+        city_raw = s[:idx].strip(" ,;-")
+        return format_city(city_raw), format_np(m2.group(1))
+    # якщо не знайшли — повертаємо як є
+    return format_city(s), ""
+
+def _collect_items_from_lines(lines: List[str]) -> List[Tuple[str, int]]:
+    items: List[Tuple[str, int]] = []
+    whole = "\n".join(lines)
+    # 1) Спроба глобально
+    items = detect_point4_items(whole)
+    if items:
+        return items
+    # 2) Спроба построково
+    for ln in lines:
+        cand = detect_point4_items(ln)
+        for it in cand:
+            if it not in items:
+                items.append(it)
+    # 3) Простий патерн '10 шт англія'
+    if not items:
+        simple_re = re.compile(r"(\d{1,4}).{0,10}\b([A-Za-zА-Яа-яІіЇїЄє\+0-9\.\- ]{2,})\b")
+        for ln in lines:
+            m = simple_re.search(ln)
+            if m:
+                qty = int(m.group(1))
+                country_key = normalize_country(m.group(2)).upper()
+                if country_key in PRICE_TIERS:
+                    items.append((country_key, qty))
+    return items
+
+def render_order_for_group(order: OrderData, paid: bool) -> str:
+    """
+    Спеціальний рендер для групи: без «дякуємо» та, якщо paid=True, замість ціни пише '(замовлення оплачене)'.
+    """
+    lines = []
+    grand_total = 0
+    counted = 0
+    for it in order.items:
+        c_norm = normalize_country(it.country)
+        disp_base = DISPLAY.get(c_norm, it.country.strip().title())
+        op = canonical_operator(getattr(it, "operator", None))
+        op_suf = f" (оператор {op})" if (op and c_norm == "ВЕЛИКОБРИТАНІЯ") else ""
+        disp = disp_base + op_suf
+        flag = FLAGS.get(c_norm, "")
+        if paid:
+            line_total_str = "(замовлення оплачене)"
+            line = f"{flag} {disp}, {it.qty} шт — {line_total_str}  \n"
+        else:
+            price = unit_price(c_norm, it.qty)
+            if price is None:
+                line_total_str = "договірна"
+                line = f"{flag} {disp}, {it.qty} шт — {line_total_str}  \n"
+            else:
+                line_total = price * it.qty
+                grand_total += line_total
+                counted += 1
+                line = f"{flag} {disp}, {it.qty} шт — {line_total} грн  \n"
+        lines.append(line)
+
+    header = (
+        f"{format_full_name(order.full_name)} \n"
+        f"{_soft_phone_spaces(order.phone)}\n"
+        f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
+    )
+    footer = ""
+    if not paid and counted >= 2:
+        footer = f"\nЗагальна сумма: {grand_total} грн\n"
+    return header + "".join(lines) + footer
+
+def parse_manager_group_text(text: str) -> Optional[Tuple[OrderData, bool]]:
+    """
+    Простий парсер для формату:
+    1-й рядок — ПІБ
+    2-й — телефон
+    3-й — місто + №
+    4-й+ — країна/кількість (можна варіювати)
+    Повертає (order, paid)
+    """
+    if not text:
+        return None
+    paid = bool(PAID_HINT_RE.search(text))
+    rows = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not rows:
+        return None
+
+    # Ім'я
+    full_name = rows[0]
+
+    # Телефон — шукаємо перший рядок з 7-12 цифрами
+    phone = ""
+    phone_idx = -1
+    for i in range(1, len(rows)):
+        d = re.sub(r"\D", "", rows[i])
+        if 7 <= len(d) <= 12:
+            phone = rows[i]
+            phone_idx = i
+            break
+    if not phone and len(rows) >= 2:
+        phone = rows[1]
+        phone_idx = 1
+
+    # Місто + № — перший рядок після телефона, де є букви і цифри
+    city = ""
+    np = ""
+    city_idx = -1
+    for j in range(phone_idx + 1, len(rows)):
+        if re.search(r"[A-Za-zА-Яа-яІіЇїЄє]", rows[j]) and re.search(r"\d", rows[j]):
+            city, np = _parse_city_and_np(rows[j])
+            city_idx = j
+            break
+    if city_idx == -1 and len(rows) >= 3:
+        city, np = _parse_city_and_np(rows[2])
+
+    # Items — з решти рядків або з усього тексту
+    tail = rows[city_idx + 1:] if city_idx != -1 else rows[3:]
+    items_list = _collect_items_from_lines(tail if tail else rows)
+    if not items_list:
+        return None
+
+    items = [OrderItem(country=c, qty=q) for (c, q) in items_list]
+    return OrderData(full_name=full_name, phone=phone, city=city, np=np, items=items), paid
+
 # ==== OpenAI ====
 async def _openai_chat(messages: List[Dict[str, str]]) -> str:
     try:
@@ -833,61 +976,6 @@ async def _ask_gpt_force_point4(history: List[Dict[str, str]], user_payload: str
         logger.error(f"Помилка force-point4 до OpenAI: {e}")
         return ""
 
-# ==== Парсинг повідомлення менеджера в групі ====
-ITEM_LINE_RE = re.compile(r"(\d+)\s*(шт|штук|шт\.?|сим(?:-?карт[аи])?|sim-?card|sim|pieces?)\s*(.*)", re.IGNORECASE)
-
-async def handle_manager_message_in_group(msg: Message, context: ContextTypes.DEFAULT_TYPE):
-    text = (msg.text or "").strip()
-    if not text:
-        return
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if len(lines) < 4:
-        return
-
-    paid = "без нал" in text.lower()
-
-    full_name = lines[0]
-    phone = lines[1]
-    city_np_line = lines[2]
-    item_lines = lines[3:]
-
-    # Парсинг city_np
-    city_np_parts = re.split(r"\s*№\s*", city_np_line)
-    city = city_np_parts[0].strip() if city_np_parts else ""
-    np = city_np_parts[1].strip() if len(city_np_parts) > 1 else ""
-
-    # Парсинг items
-    items = []
-    for line in item_lines:
-        m = ITEM_LINE_RE.match(line)
-        if not m:
-            continue
-        qty = int(m.group(1))
-        rest = m.group(3).strip()
-        country = normalize_country(rest)
-        operator = canonical_operator(rest) if country == "ВЕЛИКОБРИТАНІЯ" else None
-        if country:
-            items.append(OrderItem(country=country, qty=qty, operator=operator))
-
-    if not items:
-        return
-
-    order = OrderData(
-        full_name=full_name,
-        phone=phone,
-        city=city,
-        np=np,
-        items=items
-    )
-
-    summary = render_order(order, paid=paid)
-
-    await msg.delete()
-    await context.bot.send_message(
-        chat_id=msg.chat_id,
-        text=summary
-    )
-
 # ===== /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -905,13 +993,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("No effective_message in update: %s", update)
         return
 
-    # Спеціальна обробка для @Sim_Card_Three в групі ORDER_FORWARD_CHAT_ID
-    if msg.chat_id == ORDER_FORWARD_CHAT_ID and msg.from_user and msg.from_user.username == "Sim_Card_Three":
-        await handle_manager_message_in_group(msg, context)
-        return
-
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
+
+    # --- НОВЕ: спеціальна обробка менеджера @Sim_Card_Three САМЕ в групі ORDER_FORWARD_CHAT_ID ---
+    # Знімаємо ігнор тільки для цієї групи: парсимо запис, видаляємо оригінал, публікуємо красиво.
+    if (
+        msg.chat and msg.chat.id == ORDER_FORWARD_CHAT_ID
+        and msg.from_user and msg.from_user.username
+        and msg.from_user.username.lower() == (DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()
+    ):
+        parsed = parse_manager_group_text(raw_user_message)
+        if parsed:
+            order, paid_flag = parsed
+            # Спробуємо видалити оригінальне повідомлення менеджера (потрібні права адміна)
+            try:
+                await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+            except Exception as e:
+                logger.warning(f"Не вдалося видалити повідомлення менеджера: {e}")
+            # Надсилаємо структурований підсумок (без 'дякуємо' та @username)
+            formatted = render_order_for_group(order, paid=paid_flag)
+            await context.bot.send_message(chat_id=msg.chat.id, text=formatted)
+            return
+        else:
+            # Якщо не вдалось розпарсити — НЕ падаємо, йдемо далі (може це не замовлення)
+            logger.info("Не вдалося розпарсити формат повідомлення менеджера для групи.")
 
     # Якщо пише менеджер — НЕ відповідаємо, але додаємо в history як контекст
     if _is_manager_message(msg):
