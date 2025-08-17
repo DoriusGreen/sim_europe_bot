@@ -276,7 +276,9 @@ def format_phone(phone: str) -> str:
         digits = "0" + digits[3:]
     if len(digits) == 10:
         return f"{digits[0:3]} {digits[3:6]} {digits[6:10]}"
-    return (phone or "").strip()
+    if len(digits) == 9 and digits.startswith("0"):
+        return f"{digits[0:3]} {digits[3:6]} {digits[6:9]}"
+    return re.sub(r"-", " ", (phone or "").strip())
 
 def _split_city_extra(city: str):
     s = " ".join((city or "").split())
@@ -327,7 +329,7 @@ def _order_signature(order: OrderData) -> str:
     )
     return f"{format_full_name(order.full_name)}|{format_phone(order.phone)}|{format_city(order.city)}|{format_np(order.np)}|{items_sig}"
 
-def render_order(order: OrderData) -> str:
+def render_order(order: OrderData, paid: bool = False) -> str:
     lines = []
     grand_total = 0
     counted_countries = 0
@@ -340,15 +342,17 @@ def render_order(order: OrderData) -> str:
         disp = disp_base + op_suf
 
         flag = FLAGS.get(c_norm, "")
-        price = unit_price(c_norm, it.qty)
-
-        if price is None:
-            line_total_str = "договірна"
+        if paid:
+            line_total_str = "(замовлення оплачене)"
         else:
-            line_total = price * it.qty
-            grand_total += line_total
-            counted_countries += 1
-            line_total_str = str(line_total)
+            price = unit_price(c_norm, it.qty)
+            if price is None:
+                line_total_str = "договірна"
+            else:
+                line_total = price * it.qty
+                grand_total += line_total
+                counted_countries += 1
+                line_total_str = str(line_total)
 
         lines.append(ORDER_LINE.format(
             flag=flag, disp=disp, qty=it.qty, line_total=line_total_str
@@ -360,7 +364,7 @@ def render_order(order: OrderData) -> str:
         f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
     )
     body = "".join(lines) + "\n"
-    footer = f"Загальна сумма: {grand_total} грн\n" if counted_countries >= 2 else ""
+    footer = f"Загальна сумма: {grand_total} грн\n" if counted_countries >= 2 and not paid else ""
     return header + body + footer
 
 # ==== JSON парсери ====
@@ -628,7 +632,9 @@ def build_system_prompt() -> str:
         "<залиши лише відсутні рядки з їхніми номерами, напр.>\n"
         "2. Номер телефону.\n"
         "4. Країна(и) та кількість sim-карт.\n\n"
-        "Якщо жодного пункту ще не виявлено, відповідай як на звичайне запитання, без чек-листа.\n\n"
+        "Якщо жодного пункту ще не виявлено, відповідай як на звичайне запитання, без чек-листа.\n"
+        "Якщо зібраний якийсь один пункт, але клієнт починає запитувати щось чи вести розмову про щось інше, то не потрібно дублювати повідомлення про нестачу даних,\n"
+        "почекай поки клієнт сам не продовжить оформляти замовлення, або сам не запитає які дані ще потрібні.\n\n" 
 
         # === ФОРМАТ JSON ДЛЯ БЕКЕНДА ===
         "Коли ВСІ дані є — ВІДПОВІДАЙ ЛИШЕ JSON за схемою (без підсумку, без зайвого тексту):\n"
@@ -825,6 +831,61 @@ async def _ask_gpt_force_point4(history: List[Dict[str, str]], user_payload: str
         logger.error(f"Помилка force-point4 до OpenAI: {e}")
         return ""
 
+# ==== Парсинг повідомлення менеджера в групі ====
+ITEM_LINE_RE = re.compile(r"(\d+)\s*(шт|штук|шт\.?|сим(?:-?карт[аи])?|sim-?card|sim|pieces?)\s*(.*)", re.IGNORECASE)
+
+async def handle_manager_message_in_group(msg: Message, context: ContextTypes.DEFAULT_TYPE):
+    text = (msg.text or "").strip()
+    if not text:
+        return
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 4:
+        return
+
+    paid = "без нал" in text.lower()
+
+    full_name = lines[0]
+    phone = lines[1]
+    city_np_line = lines[2]
+    item_lines = lines[3:]
+
+    # Парсинг city_np
+    city_np_parts = re.split(r"\s*№\s*", city_np_line)
+    city = city_np_parts[0].strip() if city_np_parts else ""
+    np = city_np_parts[1].strip() if len(city_np_parts) > 1 else ""
+
+    # Парсинг items
+    items = []
+    for line in item_lines:
+        m = ITEM_LINE_RE.match(line)
+        if not m:
+            continue
+        qty = int(m.group(1))
+        rest = m.group(3).strip()
+        country = normalize_country(rest)
+        operator = canonical_operator(rest) if country == "ВЕЛИКОБРИТАНІЯ" else None
+        if country:
+            items.append(OrderItem(country=country, qty=qty, operator=operator))
+
+    if not items:
+        return
+
+    order = OrderData(
+        full_name=full_name,
+        phone=phone,
+        city=city,
+        np=np,
+        items=items
+    )
+
+    summary = render_order(order, paid=paid)
+
+    await msg.delete()
+    await context.bot.send_message(
+        chat_id=msg.chat_id,
+        text=summary
+    )
+
 # ===== /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -840,6 +901,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
         logger.warning("No effective_message in update: %s", update)
+        return
+
+    # Спеціальна обробка для @Sim_Card_Three в групі ORDER_FORWARD_CHAT_ID
+    if msg.chat_id == ORDER_FORWARD_CHAT_ID and msg.from_user and msg.from_user.username == "Sim_Card_Three":
+        await handle_manager_message_in_group(msg, context)
         return
 
     raw_user_message = msg.text.strip() if msg.text else ""
