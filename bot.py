@@ -27,7 +27,7 @@ PORT = int(os.getenv("PORT", "8443"))
 openai.api_key = OPENAI_API_KEY
 
 # ==== Константи пам'яті/міток ====
-MAX_TURNS = 15
+MAX_TURNS = 10  # Зменшено з 15 до 10 (20 повідомлень в історії)
 ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
 
 # ==== КУДА ДУБУЮ Є ЗАМОВЛЕННЯ (ГРУПА) ====
@@ -278,23 +278,9 @@ def format_phone(phone: str) -> str:
         return f"{digits[0:3]} {digits[3:6]} {digits[6:10]}"
     return (phone or "").strip()
 
-def _split_city_extra(city: str):
-    s = " ".join((city or "").split())
-    m = re.match(r"(.+?)\s*\((.+)\)\s*$", s)
-    if m:
-        return m.group(1), m.group(2)
-    parts = re.split(r"\s*[,;/—–-]\s*", s, maxsplit=1)
-    if len(parts) == 2:
-        return parts[0], parts[1]
-    return s, None
-
 def format_city(city: str) -> str:
-    base, extra = _split_city_extra(city)
-    base_fmt = _smart_title(base)
-    if extra:
-        extra_fmt = _smart_title(extra)
-        return f"{base_fmt} ({extra_fmt})"
-    return base_fmt
+    # Проста версія, оскільки GPT вже має розділити місто та НП
+    return _smart_title(city)
 
 def format_np(np_str: str) -> str:
     s = (np_str or "").strip()
@@ -387,7 +373,7 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
             items=items
         )
     except Exception as e:
-        logger.warning(f"Не вдалося розпарсити JSON: {e}")
+        logger.warning(f"Не вдалося розпарсити JSON замовлення: {e}")
         return None
 
 def try_parse_price_json(text: str) -> Optional[List[str]]:
@@ -737,6 +723,9 @@ ACK_PATTERNS = [
 def is_ack_only(text: str) -> bool:
     if not text:
         return False
+    # Розширимо патерн для повідомлення "ух ты..."
+    if re.match(r"^\s*ух\s*ты\b", text.strip().lower()):
+        return True
     low = text.strip().lower()
     for p in ACK_PATTERNS:
         if re.match(p, low):
@@ -775,62 +764,92 @@ def _prune_history(history: List[Dict[str, str]]) -> None:
     if len(history) > MAX_TURNS * 2:
         del history[: len(history) - MAX_TURNS * 2]
 
-# ======== НОВЕ: допоміжні для групової обробки від @Sim_Card_Three ========
+# ======== НОВЕ: GPT-парсер для повідомлень менеджера ========
 PAID_HINT_RE = re.compile(r"\b(без\s*нал|безнал|оплачено|передоплат|оплата\s*на\s*карт[уі])\b", re.IGNORECASE)
 
-def _soft_phone_spaces(phone: str) -> str:
-    """
-    М'яко приводить телефон до пробілів: '098-666-777' -> '098 666 777'. Якщо format_phone вже зробив 3-3-4 — залишає як є.
-    """
-    base = format_phone(phone)
-    # Якщо після format_phone лишились нецифрові роздільники — нормалізуємо їх у пробіли
-    cleaned = re.sub(r"[^\d]", " ", base)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned if cleaned else base.strip()
+def build_manager_parser_prompt() -> str:
+    # Створюємо список канонічних назв країн для інструкції
+    country_keys = ", ".join(f'"{k}"' for k in PRICE_TIERS.keys())
+    return (
+        "Ти — сервіс для вилучення даних. Твоє завдання — розібрати неструктурований текст із даними замовлення та повернути їх у вигляді чіткого JSON-об'єкта.\n\n"
+        "Вхідний текст може містити:\n"
+        "- ПІБ клієнта (повне або часткове).\n"
+        "- Номер телефону.\n"
+        "- Місто та номер відділення «Нової Пошти».\n"
+        "- Перелік замовлених SIM-карт (країна та кількість).\n"
+        "- Сторонні коментарі, які потрібно ігнорувати.\n\n"
+        "Правила:\n"
+        "1. Твоя відповідь має бути ТІЛЬКИ JSON-об'єктом. Без жодних пояснень, тексту до чи після, чи markdown-форматування.\n"
+        "2. Для країн використовуй СУВОРО канонічні назви з цього списку: " + country_keys + ".\n"
+        "3. Поля `full_name`, `phone`, `city`, `np` мають бути рядками. Поле `items` — масивом об'єктів.\n"
+        "4. Якщо якісь дані відсутні в тексті, залиш відповідне поле як порожній рядок \"\" або порожній масив [].\n\n"
+        "Приклад:\n"
+        "Вхідний текст: 'Так, це новий клієнт, Іван Франко, тел 0991234567. Хоче 2 сімки для Англії та 1 для США. Відправка в Київ, відділення 30. Каже, що оплатить на карту.'\n"
+        "Твоя відповідь (лише цей JSON):\n"
+        "{\n"
+        '  "full_name": "Іван Франко",\n'
+        '  "phone": "0991234567",\n'
+        '  "city": "Київ",\n'
+        '  "np": "30",\n'
+        '  "items": [\n'
+        '    {"country": "ВЕЛИКОБРИТАНІЯ", "qty": 2},\n'
+        '    {"country": "США", "qty": 1}\n'
+        '  ]\n'
+        "}"
+    )
 
-def _parse_city_and_np(line: str) -> Tuple[str, str]:
-    """
-    Витягує місто та № НП з рядка. Підтримує 'Київ № 377', 'Львів 377', 'Одеса No 12', 'Dnipro #45'
-    """
-    s = " ".join((line or "").split())
-    m = re.search(r"^(.*?)(?:\s*(?:№|#|no|n)\s*)?(\d{1,5})\s*$", s, flags=re.IGNORECASE)
-    if m:
-        city_raw = m.group(1).strip(" ,;-")
-        np_raw = m.group(2)
-        return format_city(city_raw), format_np(np_raw)
-    # fallback: останні цифри — номер відділення
-    m2 = re.search(r"(\d{1,5})(?!.*\d)", s)
-    if m2:
-        idx = m2.start()
-        city_raw = s[:idx].strip(" ,;-")
-        return format_city(city_raw), format_np(m2.group(1))
-    # якщо не знайшли — повертаємо як є
-    return format_city(s), ""
+async def _ask_gpt_to_parse_manager_order(text: str) -> str:
+    """Використовує GPT для парсингу хаотичного тексту від менеджера в JSON."""
+    messages = [
+        {"role": "system", "content": build_manager_parser_prompt()},
+        {"role": "user", "content": text}
+    ]
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=messages,
+            max_tokens=500,
+            temperature=0.1,
+            response_format={"type": "json_object"} # Просимо GPT гарантувати JSON на виході
+        )
+        return response.choices[0].message["content"]
+    except Exception as e:
+        logger.error(f"Помилка GPT-парсера для менеджера: {e}")
+        return ""
 
-def _collect_items_from_lines(lines: List[str]) -> List[Tuple[str, int]]:
-    items: List[Tuple[str, int]] = []
-    whole = "\n".join(lines)
-    # 1) Спроба глобально
-    items = detect_point4_items(whole)
-    if items:
-        return items
-    # 2) Спроба построково
-    for ln in lines:
-        cand = detect_point4_items(ln)
-        for it in cand:
-            if it not in items:
-                items.append(it)
-    # 3) Простий патерн '10 шт англія'
-    if not items:
-        simple_re = re.compile(r"(\d{1,4}).{0,10}\b([A-Za-zА-Яа-яІіЇїЄє\+0-9\.\- ]{2,})\b")
-        for ln in lines:
-            m = simple_re.search(ln)
-            if m:
-                qty = int(m.group(1))
-                country_key = normalize_country(m.group(2)).upper()
-                if country_key in PRICE_TIERS:
-                    items.append((country_key, qty))
-    return items
+def try_parse_manager_order_json(json_text: str) -> Optional[OrderData]:
+    """Парсить JSON-рядок від GPT у датаклас OrderData."""
+    if not json_text:
+        return None
+    try:
+        data = json.loads(json_text)
+        # Перевірка наявності ключових полів
+        if not all(k in data for k in ["full_name", "phone", "city", "np", "items"]):
+            logger.warning("GPT-парсер повернув JSON без необхідних полів.")
+            return None
+
+        items = [OrderItem(
+            country=i["country"],
+            qty=int(i["qty"]),
+            operator=i.get("operator")
+        ) for i in data.get("items", [])]
+
+        # Перевірка, що хоча б якісь дані є
+        if not data.get("full_name") and not data.get("phone") and not items:
+            logger.info("GPT-парсер не знайшов жодних суттєвих даних у тексті.")
+            return None
+
+        return OrderData(
+            full_name=data.get("full_name", "").strip(),
+            phone=data.get("phone", "").strip(),
+            city=data.get("city", "").strip(),
+            np=str(data.get("np", "")).strip(),
+            items=items
+        )
+    except (json.JSONDecodeError, TypeError, KeyError, ValueError) as e:
+        logger.warning(f"Не вдалося розпарсити JSON від GPT-парсера: {e}\nТекст: {json_text}")
+        return None
+
 
 def render_order_for_group(order: OrderData, paid: bool) -> str:
     """
@@ -863,7 +882,7 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
 
     header = (
         f"{format_full_name(order.full_name)} \n"
-        f"{_soft_phone_spaces(order.phone)}\n"
+        f"{format_phone(order.phone)}\n"
         f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
     )
     footer = ""
@@ -871,60 +890,7 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
         footer = f"\nЗагальна сумма: {grand_total} грн\n"
     return header + "".join(lines) + footer
 
-def parse_manager_group_text(text: str) -> Optional[Tuple[OrderData, bool]]:
-    """
-    Простий парсер для формату:
-    1-й рядок — ПІБ
-    2-й — телефон
-    3-й — місто + №
-    4-й+ — країна/кількість (можна варіювати)
-    Повертає (order, paid)
-    """
-    if not text:
-        return None
-    paid = bool(PAID_HINT_RE.search(text))
-    rows = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-    if not rows:
-        return None
-
-    # Ім'я
-    full_name = rows[0]
-
-    # Телефон — шукаємо перший рядок з 7-12 цифрами
-    phone = ""
-    phone_idx = -1
-    for i in range(1, len(rows)):
-        d = re.sub(r"\D", "", rows[i])
-        if 7 <= len(d) <= 12:
-            phone = rows[i]
-            phone_idx = i
-            break
-    if not phone and len(rows) >= 2:
-        phone = rows[1]
-        phone_idx = 1
-
-    # Місто + № — перший рядок після телефона, де є букви і цифри
-    city = ""
-    np = ""
-    city_idx = -1
-    for j in range(phone_idx + 1, len(rows)):
-        if re.search(r"[A-Za-zА-Яа-яІіЇїЄє]", rows[j]) and re.search(r"\d", rows[j]):
-            city, np = _parse_city_and_np(rows[j])
-            city_idx = j
-            break
-    if city_idx == -1 and len(rows) >= 3:
-        city, np = _parse_city_and_np(rows[2])
-
-    # Items — з решти рядків або з усього тексту
-    tail = rows[city_idx + 1:] if city_idx != -1 else rows[3:]
-    items_list = _collect_items_from_lines(tail if tail else rows)
-    if not items_list:
-        return None
-
-    items = [OrderItem(country=c, qty=q) for (c, q) in items_list]
-    return OrderData(full_name=full_name, phone=phone, city=city, np=np, items=items), paid
-
-# ==== OpenAI ====
+# ==== OpenAI (основні функції) ====
 async def _openai_chat(messages: List[Dict[str, str]]) -> str:
     try:
         response = openai.ChatCompletion.create(
@@ -997,39 +963,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
 
-    # ======================== ПОЧАТОК ВИПРАВЛЕННЯ ========================
     # Перевіряємо, чи це не просте повідомлення "дякую/ок" одразу після успішного замовлення.
-    # Якщо так - ігноруємо його, щоб не запускати знову логіку збору даних.
     last_order_time = context.chat_data.get("last_order_time", 0)
     if is_ack_only(raw_user_message) and (time.time() - last_order_time) < ORDER_DUP_WINDOW_SEC:
         logger.info(f"Проігноровано ACK повідомлення після замовлення: '{raw_user_message}'")
         return
-    # ========================= КІНЕЦЬ ВИПРАВЛЕННЯ =========================
 
-    # --- НОВЕ: спеціальна обробка менеджера @Sim_Card_Three САМЕ в групі ORDER_FORWARD_CHAT_ID ---
-    # Знімаємо ігнор тільки для цієї групи: парсимо запис, видаляємо оригінал, публікуємо красиво.
+    # --- НОВЕ: обробка повідомлень від менеджера в групі через GPT ---
     if (
         msg.chat and msg.chat.id == ORDER_FORWARD_CHAT_ID
         and msg.from_user and msg.from_user.username
         and msg.from_user.username.lower() == (DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()
     ):
-        parsed = parse_manager_group_text(raw_user_message)
-        if parsed:
-            order, paid_flag = parsed
-            # Спробуємо видалити оригінальне повідомлення менеджера (потрібні права адміна)
+        # Відправляємо текст на парсинг до GPT
+        json_response_str = await _ask_gpt_to_parse_manager_order(raw_user_message)
+        parsed_order = try_parse_manager_order_json(json_response_str)
+
+        if parsed_order:
+            # Визначаємо, чи було замовлення оплачене
+            paid_flag = bool(PAID_HINT_RE.search(raw_user_message))
+            
+            # Спробуємо видалити оригінальне повідомлення менеджера
             try:
                 await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
             except Exception as e:
                 logger.warning(f"Не вдалося видалити повідомлення менеджера: {e}")
-            # Надсилаємо структурований підсумок (без 'дякуємо' та @username)
-            formatted = render_order_for_group(order, paid=paid_flag)
+            
+            # Надсилаємо структурований підсумок
+            formatted = render_order_for_group(parsed_order, paid=paid_flag)
             await context.bot.send_message(chat_id=msg.chat.id, text=formatted)
             return
         else:
-            # Якщо не вдалось розпарсити — НЕ падаємо, йдемо далі (може це не замовлення)
-            logger.info("Не вдалося розпарсити формат повідомлення менеджера для групи.")
+            # Якщо GPT не зміг розпарсити, логуємо і нічого не робимо
+            logger.info("GPT-парсер не зміг структурувати повідомлення менеджера.")
+            # Можна додати видалення, якщо ви не хочете, щоб невдалі повідомлення залишались
+            # try:
+            #     await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+            # except: pass
+            return
 
-    # Якщо пише менеджер — НЕ відповідаємо, але додаємо в history як контекст
+    # Якщо пише менеджер (в іншому чаті) — НЕ відповідаємо, але додаємо в history як контекст
     if _is_manager_message(msg):
         text = (msg.text or msg.caption or "").strip()
         if text:
