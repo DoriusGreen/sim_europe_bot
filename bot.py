@@ -27,7 +27,7 @@ PORT = int(os.getenv("PORT", "8443"))
 openai.api_key = OPENAI_API_KEY
 
 # ==== Константи пам'яті/міток ====
-MAX_TURNS = 10  # Зменшено з 15 до 10 (20 повідомлень в історії)
+MAX_TURNS = 10
 ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
 
 # ==== КУДА ДУБУЮ Є ЗАМОВЛЕННЯ (ГРУПА) ====
@@ -586,23 +586,16 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
 # ==== СИСТЕМНІ ПРОМПТИ ====
 def build_system_prompt() -> str:
     return (
-        # === РОЛЬ ТА КОНТЕКСТ ===
         "Ти — дружелюбний і корисний Telegram-бот-магазин SIM-карт. Чітко та суворо дотримуйся прописаних інструкцій, якщо щось не зрозуміло, то не вигадуй, а краще перепитай клієнта що він мав на увазі.\n"
         "На початку чату клієнт уже отримує від акаунта власника перелік країн у наявності та інформацію для доставки — ти це НЕ ДУБЛЮЄШ.\n"
         "Завжди аналізуй кожне повідомлення на наявність елементів замовлення (пункти 1-4 нижче). Якщо в повідомленні або історії є хоча б один пункт, починай процес збору даних: показуй, що бракує, або формуй JSON, якщо все є.\n"
         "Не чекай явного 'хочу оформити' — починай збір одразу при виявленні даних.\n\n"
-
-        # === РОБОТА З REPLY/ЦИТАТАМИ ===
         "Якщо поточне повідомлення є відповіддю (reply) на інше — вважай текст процитованого повідомлення частиною актуальних даних і використовуй його для заповнення пунктів 1–4, якщо це доречно.\n\n"
-
-        # === СТРУКТУРА ЗАМОВЛЕННЯ ===
         "ПОВНЕ замовлення складається з 4 пунктів:\n"
         "1. Ім'я та прізвище.\n"
         "2. Номер телефону.\n"
         "3. Місто та № відділення «Нової Пошти».\n"
         "4. Країна(и) та кількість sim-карт.\n\n"
-
-        # === ЯК ПИТАТИ ПРО НЕСТАЧУ ДАНИХ ===
         "Пункт 4 може бути у довільній формі/порядку («Англія 2 шт», «дві UK», «UK x2» тощо).\n"
         "Якщо пункт 4 прийшов окремим повідомленням — поєднуй його з пунктами 1–3 з контексту.\n\n"
         "Якщо виявлено хоча б один пункт, але ще НЕ вказано ВСІ 4 — відповідай СУВОРО в такому вигляді (без зайвого тексту до/після):\n"
@@ -611,8 +604,6 @@ def build_system_prompt() -> str:
         "2. Номер телефону.\n"
         "4. Країна(и) та кількість sim-карт.\n\n"
         "Якщо жодного пункту ще не виявлено, відповідай як на звичайне запитання, без чек-листа.\n\n"
-
-        # === ФОРМАТ JSON ДЛЯ БЕКЕНДА ===
         "Коли ВСІ дані є — ВІДПОВІДАЙ ЛИШЕ JSON за схемою (без підсумку, без зайвого тексту):\n"
         "{\n"
         '  "full_name": "Імʼя Прізвище",\n'
@@ -621,40 +612,26 @@ def build_system_prompt() -> str:
         '  "np": "Номер відділення або поштомат",\n'
         '  "items": [ {"country":"КРАЇНА","qty":N,"operator":"O2|Lebara|Vodafone"}, ... ]\n'
         "}\n\n"
-
-        # === ПРАЙС/НАЯВНІСТЬ ===
         "Якщо користувач запитує ПРО ЦІНИ або про наявність — ВІДПОВІДАЙ ЛИШЕ JSON:\n"
         "{\n"
         '  "ask_prices": true,\n'
         '  "countries": ["ALL" або перелік ключів, напр. "ВЕЛИКОБРИТАНІЯ","США"]\n'
         "}\n\n"
-
-        # === ДОВІДКА USSD ===
         "Якщо користувач запитує, як дізнатися/перевірити свій номер на SIM — ВІДПОВІДАЙ ЛИШЕ JSON:\n"
         "{\n"
         '  "ask_ussd": true,\n'
         '  "targets": [ {"country":"КРАЇНА","operator":"Опціонально: O2|Lebara|Vodafone|Movistar|Lycamobile|T-mobile|Kaktus"}, ... ]\n'
         "}\n"
         "Якщо країна не вказана — УТОЧНИ.\n\n"
-
-        # === ДОСТУПНІ ДЛЯ ПРОДАЖУ ===
         "Для прайсу/наявності доступні ЛИШЕ: ВЕЛИКОБРИТАНІЯ, НІДЕРЛАНДИ, НІМЕЧЧИНА, ФРАНЦІЯ, ІСПАНІЯ, ЧЕХІЯ, ПОЛЬЩА, ЛИТВА, ЛАТВІЯ, КАЗАХСТАН, МАРОККО, США.\n"
         "Не стверджуй наявність/ціну для інших країн (але довідку USSD можна давати і для інших, якщо відома комбінація).\n\n"
-
-        # === СЕМАНТИКА ===
         "• Розумій країни за синонімами/містами/мовою (UK/United Kingdom/+44/Британія → ВЕЛИКОБРИТАНІЯ; USA/Америка/Штати → США).\n"
         "• Для items використовуй ключі: ВЕЛИКОБРИТАНІЯ, НІДЕРЛАНДИ, НІМЕЧЧИНА, ФРАНЦІЯ, ІСПАНІЯ, ЧЕХІЯ, ПОЛЬЩА, ЛИТВА, ЛАТВІЯ, КАЗАХСТАН, МАРОККО, США.\n"
         "• Якщо клієнт для Англії називає оператора (O2, Lebara, Vodafone) — додай поле \"operator\" з канонічним значенням; інакше — не додавай це поле.\n"
         "• Текстові кількості (пара/десяток/кілька) перетворюй у число або попроси уточнення через пункт 4.\n\n"
-
-        # === ЕСКАЛАЦІЯ ДО ЛЮДИНИ ===
         "Запити «зв’язатися з людиною/менеджером/оператором» — це звернення до МЕНЕДЖЕРА магазину. Відповідай: «Очікуйте відповіді менеджера.»\n"
         "Лише якщо явно питають про дзвінки через SIM — розповідай про поповнення/дзвінки.\n\n"
-
-        # === ПІСЛЯ JSON ===
         "Після JSON бекенд сам рахує суми та формує підсумок. «Загальна сумма» показується лише якщо країн 2+.\n\n"
-
-        # === FAQ (КОРОТКО) ===
         "FAQ — використвуй цю інформацію для відповідей на ці, або дуже схожі, запитання, відповіді давай короткі та по суті:\n\n"
         "Як активувати SIM-карту?\n"
         "Просто вставте в телефон і почекайте поки сім-карта підключиться до мережі (або підключіться до мережі вручну через налаштування в телефоні).\n\n"
@@ -682,8 +659,7 @@ def build_system_prompt() -> str:
         "Так, від 3 шт, повна передоплата, «Нова Пошта».\n\n"
         "Який оператор для конкретної країни?\n"
         "Ти не пропонуєш операторів сам, тільки відповідаєш, коли клієнт сам конкретно запитує про оператора для країни. Якщо клієнт запитує про неіснуючого оператора для країни (наприклад, Vodafone для Німеччини, але є тільки Lebara), скажи, що в роботі оператор Lebara (або той, що є) нічим не відрізняється. Оператори для країн: Нідерланди - Lebara; Франція - Lebara; Іспанія - Lebara; Чехія - T-Mobile та Kaktus; Польща - Play (але потрібно уточнити у менеджера); Литва - Labas; Казахстан - Tele2; США - Lycamobile.\n\n"
-
-        # === США — ОСОБЛИВО ===
+        "# === США — ОСОБЛИВО ===\n"
         "США — на відміну від інших, потребують поповнення для активації. Після поповнення SIM працюватиме на прийом SMS.\n\n"
         "Якщо користувача цікавить активація, поповнення або деталі використання SIM-карт США — ВІДПОВІДАЙ ЛИШЕ JSON-об'єктом: {\"ask_usa_activation\": true}"
     )
@@ -708,428 +684,39 @@ def build_force_point4_prompt() -> str:
         "Витягни пункт 4, поєднай з 1–3 з контексту і ПОВЕРНИ ЛИШЕ ПОВНИЙ JSON замовлення."
     )
 
-def _ensure_history(ctx: ContextTypes.DEFAULT_TYPE) -> List[Dict[str, str]]:
-    if "history" not in ctx.chat_data:
-        ctx.chat_data["history"] = []
-    return ctx.chat_data["history"]
+def is_ack_only(text: str) -> bool:
+    if not text:
+        return False
+    if re.match(r"^\s*ух\s*ты\b", text.strip().lower()):
+        return True
+    low = text.strip().lower()
+    for p in ACK_PATTERNS:
+        if re.match(p, low):
+            return True
+    return False
 
-def _prune_history(history: List[Dict[str, str]]) -> None:
-    if len(history) > MAX_TURNS * 2:
-        del history[: len(history) - MAX_TURNS * 2]
-
-def build_manager_parser_prompt() -> str:
-    country_keys = ", ".join(f'"{k}"' for k in PRICE_TIERS.keys())
-    return (
-        "Ти — сервіс для вилучення даних. Твоє завдання — розібрати неструктурований текст із даними замовлення та повернути їх у вигляді чіткого JSON-об'єкта.\n\n"
-        "Вхідний текст може містити:\n"
-        "- ПІБ клієнта (повне або часткове).\n"
-        "- Номер телефону.\n"
-        "- Місто та номер відділення «Нової Пошти».\n"
-        "- Перелік замовлених SIM-карт (країна та кількість).\n"
-        "- Сторонні коментарі, які потрібно ігнорувати.\n\n"
-        "Правила:\n"
-        "1. Твоя відповідь має бути ТІЛЬКИ JSON-об'єктом. Без жодних пояснень, тексту до чи після, чи markdown-форматування.\n"
-        "2. Для країн використовуй СУВОРО канонічні назви з цього списку: " + country_keys + ".\n"
-        "3. Поля `full_name`, `phone`, `city`, `np` мають бути рядками. Поле `items` — масивом об'єктів.\n"
-        "4. Якщо якісь дані відсутні в тексті, залиш відповідне поле як порожній рядок \"\" або порожній масив [].\n\n"
-        "Приклад:\n"
-        "Вхідний текст: 'Так, це новий клієнт, Іван Франко, тел 0991234567. Хоче 2 сімки для Англії та 1 для США. Відправка в Київ, відділення 30. Каже, що оплатить на карту.'\n"
-        "Твоя відповідь (лише цей JSON):\n"
-        "{\n"
-        '  "full_name": "Іван Франко",\n'
-        '  "phone": "0991234567",\n'
-        '  "city": "Київ",\n'
-        '  "np": "30",\n'
-        '  "items": [\n'
-        '    {"country": "ВЕЛИКОБРИТАНІЯ", "qty": 2},\n'
-        '    {"country": "США", "qty": 1}\n'
-        '  ]\n'
-        "}"
-    )
-
-async def _ask_gpt_to_parse_manager_order(text: str) -> str:
-    """Використовує GPT для парсингу хаотичного тексту від менеджера в JSON."""
-    messages = [
-        {"role": "system", "content": build_manager_parser_prompt()},
-        {"role": "user", "content": text}
+def is_meaningful_followup(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    banned_words = ["ціни", "прайс", "надіслано", "див. вище", "вище", "повторю"]
+    if any(w in low for w in banned_words):
+        return False
+    if "грн" in low or re.search(r"\bшт\.?\b", low):
+        return False
+    availability_patterns = [
+        r"^підтверджую( наявність)?\.?$",
+        r"^є в наявності\.?$",
+        r"^в наявності\.?$",
+        r"^available\.?$",
+        r"^так, є\.?$",
+        r"^так\.?$",
     ]
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=500,
-            temperature=0.1,
-            response_format={"type": "json_object"} 
-        )
-        return response.choices[0].message["content"]
-    except Exception as e:
-        logger.error(f"Помилка GPT-парсера для менеджера: {e}")
-        return ""
-
-def try_parse_manager_order_json(json_text: str) -> Optional[OrderData]:
-    """Парсить JSON-рядок від GPT у датаклас OrderData."""
-    if not json_text:
-        return None
-    try:
-        data = json.loads(json_text)
-        if not all(k in data for k in ["full_name", "phone", "city", "np", "items"]):
-            logger.warning("GPT-парсер повернув JSON без необхідних полів.")
-            return None
-        items = [OrderItem(
-            country=i["country"],
-            qty=int(i["qty"]),
-            operator=i.get("operator")
-        ) for i in data.get("items", [])]
-        if not data.get("full_name") and not data.get("phone") and not items:
-            logger.info("GPT-парсер не знайшов жодних суттєвих даних у тексті.")
-            return None
-        return OrderData(
-            full_name=data.get("full_name", "").strip(),
-            phone=data.get("phone", "").strip(),
-            city=data.get("city", "").strip(),
-            np=str(data.get("np", "")).strip(),
-            items=items
-        )
-    except (json.JSONDecodeError, TypeError, KeyError, ValueError) as e:
-        logger.warning(f"Не вдалося розпарсити JSON від GPT-парсера: {e}\nТекст: {json_text}")
-        return None
-
-def render_order_for_group(order: OrderData, paid: bool) -> str:
-    """
-    Спеціальний рендер для групи: без «дякуємо» та, якщо paid=True, замість ціни пише '(замовлення оплачене)'.
-    """
-    lines = []
-    grand_total = 0
-    counted = 0
-    for it in order.items:
-        c_norm = normalize_country(it.country)
-        disp_base = DISPLAY.get(c_norm, it.country.strip().title())
-        op = canonical_operator(getattr(it, "operator", None))
-        op_suf = f" (оператор {op})" if (op and c_norm == "ВЕЛИКОБРИТАНІЯ") else ""
-        disp = disp_base + op_suf
-        flag = FLAGS.get(c_norm, "")
-        if paid:
-            line_total_str = "(замовлення оплачене)"
-            line = f"{flag} {disp}, {it.qty} шт — {line_total_str}  \n"
-        else:
-            price = unit_price(c_norm, it.qty)
-            if price is None:
-                line_total_str = "договірна"
-                line = f"{flag} {disp}, {it.qty} шт — {line_total_str}  \n"
-            else:
-                line_total = price * it.qty
-                grand_total += line_total
-                counted += 1
-                line = f"{flag} {disp}, {it.qty} шт — {line_total} грн  \n"
-        lines.append(line)
-    header = (
-        f"{format_full_name(order.full_name)} \n"
-        f"{format_phone(order.phone)}\n"
-        f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
-    )
-    footer = ""
-    if not paid and counted >= 2:
-        footer = f"\nЗагальна сумма: {grand_total} грн\n"
-    return header + "".join(lines) + footer
-
-async def _openai_chat(messages: List[Dict[str, str]]) -> str:
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=600,
-            temperature=0.2,
-        )
-        return response.choices[0].message["content"]
-    except Exception as e:
-        logger.error(f"Помилка при зверненні до OpenAI: {e}")
-        return "Вибачте, сталася технічна помилка. Спробуйте, будь ласка, ще раз."
-
-async def _ask_gpt_main(history: List[Dict[str, str]], user_payload: str) -> str:
-    messages = [{"role": "system", "content": build_system_prompt()}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_payload})
-    return await _openai_chat(messages)
-
-async def _ask_gpt_followup(history: List[Dict[str, str]], user_payload: str) -> str:
-    messages = [{"role": "system", "content": build_followup_prompt()}]
-    tail = history[-4:] if len(history) > 4 else history[:]
-    messages.extend(tail)
-    messages.append({"role": "user", "content": user_payload})
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=300,
-            temperature=0.2,
-        )
-        return response.choices[0].message["content"].strip()
-    except Exception as e:
-        logger.error(f"Помилка follow-up до OpenAI: {e}")
-        return ""
-
-async def _ask_gpt_force_point4(history: List[Dict[str, str]], user_payload: str) -> str:
-    messages = [{"role": "system", "content": build_force_point4_prompt()}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_payload})
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=500,
-            temperature=0.1,
-        )
-        return response.choices[0].message["content"].strip()
-    except Exception as e:
-        logger.error(f"Помилка force-point4 до OpenAI: {e}")
-        return ""
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    if not msg:
-        logger.warning("No effective_message in /start update: %s", update)
-        return
-    await msg.reply_text(
-        "Вітаю! Я допоможу вам оформити замовлення на SIM-карти, а також постараюсь надати відповіді на всі ваші запитання."
-    )
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    if not msg:
-        logger.warning("No effective_message in update: %s", update)
-        return
-    raw_user_message = msg.text.strip() if msg.text else ""
-    history = _ensure_history(context)
-    last_order_time = context.chat_data.get("last_order_time", 0)
-    if is_ack_only(raw_user_message) and (time.time() - last_order_time) < ORDER_DUP_WINDOW_SEC:
-        logger.info(f"Проігноровано ACK повідомлення після замовлення: '{raw_user_message}'")
-        return
-
-    if (
-        msg.chat and msg.chat.id == ORDER_FORWARD_CHAT_ID
-        and msg.from_user and msg.from_user.username
-        and msg.from_user.username.lower() == (DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()
-    ):
-        json_response_str = await _ask_gpt_to_parse_manager_order(raw_user_message)
-        parsed_order = try_parse_manager_order_json(json_response_str)
-        if parsed_order:
-            paid_flag = bool(PAID_HINT_RE.search(raw_user_message))
-            try:
-                await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
-            except Exception as e:
-                logger.warning(f"Не вдалося видалити повідомлення менеджера: {e}")
-            formatted = render_order_for_group(parsed_order, paid=paid_flag)
-            await context.bot.send_message(chat_id=msg.chat.id, text=formatted)
-            return
-        else:
-            logger.info("GPT-парсер не зміг структурувати повідомлення менеджера.")
-            return
-
-    if _is_manager_message(msg):
-        text = (msg.text or msg.caption or "").strip()
-        if text:
-            history.append({"role": "assistant", "content": f"[Менеджер] {text}"})
-            _prune_history(history)
-        return
-
-    quoted_text = extract_quoted_text(msg)
-    user_payload = raw_user_message
-    if quoted_text:
-        user_payload = (
-            raw_user_message
-            + "\n\n[ЦЕ ПРОЦИТОВАНЕ ПОВІДОМЛЕННЯ КЛІЄНТА (вважай частиною актуальних даних):]\n"
-            + quoted_text
-        )
-
-    last_price_countries: Optional[List[str]] = context.chat_data.get("last_price_countries")
-    qty_only = detect_qty_only(raw_user_message)
-    if qty_only and last_price_countries:
-        hint_countries = ", ".join(last_price_countries)
-        user_payload += (
-            f"\n\n[ПІДСКАЗКА ДЛЯ ПАРСИНГУ: користувач вказав лише кількість {qty_only} шт. "
-            f"Застосуй її до кожної з останніх країн, для яких щойно показували прайс: {hint_countries}. "
-            f"Це відповідає пункту 4 (країна/кількість).]"
-        )
-        context.chat_data["awaiting_missing"] = {1, 2, 3}
-        context.chat_data["point4_hint"] = {"qty": qty_only, "countries": last_price_countries, "ts": time.time()}
-
-    p4_items = detect_point4_items(raw_user_message)
-    if p4_items:
-        pairs_text = "; ".join(f"{DISPLAY.get(c, c.title())} — {q}" for c, q in p4_items)
-        user_payload += (
-            f"\n\n[ПІДСКАЗКА ДЛЯ ПАРСИНГУ: пункт 4 уже заданий у цьому повідомленні: {pairs_text}. "
-            f"Склей це з пунктами 1–3 з контексту та поверни ПОВНИЙ JSON.]"
-        )
-        context.chat_data["awaiting_missing"] = {1, 2, 3}
-        context.chat_data["point4_hint"] = {"items": p4_items, "ts": time.time()}
-
-    if context.chat_data.get("awaiting_missing") == {1, 2, 3} and context.chat_data.get("point4_hint"):
-        h = context.chat_data["point4_hint"]
-        if "qty" in h and "countries" in h:
-            hc = ", ".join(h["countries"])
-            user_payload += (
-                f"\n\n[НАГАДУВАННЯ ДЛЯ ПАРСИНГУ: пункт 4 вже відомий: {hc} — по {h['qty']} шт. "
-                f"Додай/склей із пунктами 1–3.]"
-            )
-        elif "items" in h:
-            pairs_text = "; ".join(f"{DISPLAY.get(c, c.title())} — {q}" for c, q in h["items"])
-            user_payload += (
-                f"\n\n[НАГАДУВАННЯ ДЛЯ ПАРСИНГУ: пункт 4 вже відомий: {pairs_text}. "
-                f"Додай/склей із пунктами 1–3.]"
-            )
-
-    awaiting = context.chat_data.get("awaiting_missing")
-    if awaiting == {4}:
-        force_json = await _ask_gpt_force_point4(history, user_payload)
-        forced = try_parse_order_json(force_json)
-        if forced and forced.items and all([forced.full_name, forced.phone, forced.city, forced.np]):
-            summary = render_order(forced)
-            sig = _order_signature(forced)
-            context.chat_data["last_order_sig"] = sig
-            context.chat_data["last_order_time"] = time.time()
-            context.chat_data.pop("awaiting_missing", None)
-            context.chat_data.pop("point4_hint", None)
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": summary})
-            _prune_history(history)
-            await msg.reply_text(summary)
-            await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
-            try:
-                username = update.effective_user.username
-                forward_text = f"@{username}\n{summary}" if username else summary
-                await context.bot.send_message(
-                    chat_id=ORDER_FORWARD_CHAT_ID,
-                    text=forward_text
-                )
-            except Exception as e:
-                logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
-            return
-    
-    reply_text = await _ask_gpt_main(history, user_payload)
-
-    if "Залишилось вказати:" in reply_text and "📝 Залишилось вказати:" not in reply_text:
-        reply_text = reply_text.replace("Залишилось вказати:", "📝 Залишилось вказати:")
-
-    if reply_text.strip().startswith("🛒 Для оформлення замовлення") and context.chat_data.get("awaiting_missing") == {1, 2, 3}:
-        reply_text = (
-            "📝 Залишилось вказати:\n\n"
-            "1. Ім'я та прізвище.\n"
-            "2. Номер телефону.\n"
-            "3. Місто та № відділення \"Нової Пошти\".\n"
-        )
-
-    if try_parse_usa_activation_json(reply_text):
-        history.append({"role": "user", "content": raw_user_message})
-        history.append({"role": "assistant", "content": US_ACTIVATION_MSG})
-        _prune_history(history)
-        await msg.reply_text(US_ACTIVATION_MSG)
-        return
-
-    parsed = try_parse_order_json(reply_text)
-    if parsed and parsed.items and all([parsed.full_name, parsed.phone, parsed.city, parsed.np]):
-        current_sig = _order_signature(parsed)
-        last_sig = context.chat_data.get("last_order_sig")
-        last_time = context.chat_data.get("last_order_time", 0)
-        if last_sig and current_sig == last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC):
-            if not is_ack_only(raw_user_message):
-                await msg.reply_text("Замовлення вже прийнято, дякуємо! Якщо буде ще щось — пишіть 🙂")
-            context.chat_data.pop("awaiting_missing", None)
-            context.chat_data.pop("point4_hint", None)
-            return
-        summary = render_order(parsed)
-        context.chat_data["last_order_sig"] = current_sig
-        context.chat_data["last_order_time"] = time.time()
-        context.chat_data.pop("awaiting_missing", None)
-        context.chat_data.pop("point4_hint", None)
-        history.append({"role": "user", "content": raw_user_message})
-        history.append({"role": "assistant", "content": summary})
-        _prune_history(history)
-        await msg.reply_text(summary)
-        await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
-        try:
-            username = update.effective_user.username
-            forward_text = f"@{username}\n{summary}" if username else summary
-            await context.bot.send_message(
-                chat_id=ORDER_FORWARD_CHAT_ID,
-                text=forward_text
-            )
-        except Exception as e:
-            logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
-        return
-
-    price_countries = try_parse_price_json(reply_text)
-    if price_countries is not None:
-        want_all = any(str(c).upper() == "ALL" for c in price_countries)
-        normalized = [normalize_country(str(c)).upper() for c in price_countries if str(c).strip()]
-        valid = [k for k in normalized if k in PRICE_TIERS]
-        invalid = [price_countries[i] for i, k in enumerate(normalized)
-                   if k not in PRICE_TIERS and str(price_countries[i]).upper() != "ALL"]
-        if want_all:
-            context.chat_data["last_price_countries"] = list(PRICE_TIERS.keys())
-        else:
-            context.chat_data["last_price_countries"] = valid[:] if valid else []
-        if want_all:
-            price_msg = "".join(render_price_block(k) for k in PRICE_TIERS.keys())
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": price_msg})
-            _prune_history(history)
-            await msg.reply_text(price_msg)
-        elif valid:
-            price_msg = render_prices(valid)
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": price_msg})
-            _prune_history(history)
-            await msg.reply_text(price_msg)
-            if invalid:
-                await msg.reply_text(render_unavailable(invalid))
-        else:
-            unavailable_msg = render_unavailable(invalid if invalid else price_countries)
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": unavailable_msg})
-            _prune_history(history)
-            await msg.reply_text(unavailable_msg)
-        
-        follow = await _ask_gpt_followup(history, user_payload)
-        ussd_targets_followup = try_parse_ussd_json(follow)
-        if ussd_targets_followup:
-            formatted = render_ussd_targets(ussd_targets_followup) or FALLBACK_PLASTIC_MSG
-            history.append({"role": "assistant", "content": formatted})
-            _prune_history(history)
-            context.chat_data.pop("awaiting_missing", None)
-            context.chat_data.pop("point4_hint", None)
-            await msg.reply_text(formatted)
-            return
-        if is_meaningful_followup(follow):
-            if not contains_us_activation_block(follow):
-                history.append({"role": "assistant", "content": follow})
-                _prune_history(history)
-                await msg.reply_text(follow)
-        context.chat_data.pop("awaiting_missing", None)
-        return
-
-    ussd_targets = try_parse_ussd_json(reply_text)
-    if ussd_targets:
-        formatted = render_ussd_targets(ussd_targets) or FALLBACK_PLASTIC_MSG
-        history.append({"role": "user", "content": raw_user_message})
-        history.append({"role": "assistant", "content": formatted})
-        _prune_history(history)
-        context.chat_data.pop("awaiting_missing", None)
-        context.chat_data.pop("point4_hint", None)
-        await msg.reply_text(formatted)
-        return
-
-    missing = missing_points_from_reply(reply_text)
-    if missing == {4}:
-        context.chat_data["awaiting_missing"] = {4}
-    elif missing:
-        context.chat_data["awaiting_missing"] = missing
-    else:
-        if context.chat_data.get("awaiting_missing") != {1, 2, 3}:
-            context.chat_data.pop("awaiting_missing", None)
-    history.append({"role": "user", "content": raw_user_message})
-    history.append({"role": "assistant", "content": reply_text})
-    _prune_history(history)
-    await msg.reply_text(reply_text)
+    for p in availability_patterns:
+        if re.match(p, low):
+            return False
+    return len(t) >= 4
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Exception while handling update: %s", update, exc_info=context.error)
