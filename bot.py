@@ -279,7 +279,6 @@ def format_phone(phone: str) -> str:
     return (phone or "").strip()
 
 def format_city(city: str) -> str:
-    # Проста версія, оскільки GPT вже має розділити місто та НП
     return _smart_title(city)
 
 def format_np(np_str: str) -> str:
@@ -353,6 +352,14 @@ def render_order(order: OrderData) -> str:
 ORDER_JSON_RE = re.compile(r"\{[\s\S]*\}")
 PRICE_JSON_RE = re.compile(r"\{[\s\S]*\}")
 USSD_JSON_RE = re.compile(r"\{[\s\S]*\}")
+
+def try_parse_usa_activation_json(text: str) -> bool:
+    """Перевіряє, чи повернув GPT команду на показ інструкції для США."""
+    try:
+        data = json.loads(text)
+        return data.get("ask_usa_activation") is True
+    except (json.JSONDecodeError, TypeError):
+        return False
 
 def try_parse_order_json(text: str) -> Optional[OrderData]:
     m = ORDER_JSON_RE.search(text or "")
@@ -431,13 +438,6 @@ US_ACTIVATION_MSG = (
     "2. Далі, ось тут, вказавши номер, отриманий на попередньому сайті, поповнюєте сім-карту, після поповнення (мінімум на 23$) вона стане активною та буде приймати SMS."
 )
 
-def user_mentions_usa(text: str) -> bool:
-    t = (text or "").lower()
-    return bool(
-        re.search(r"\b(сша|usa|u\.s\.a\.|united states|штат[а-яіїє]+|америк[аи])\b", t)
-        or re.search(r"(^|\s)\+1(\s|$)", t)
-    )
-
 def contains_us_activation_block(text: str) -> bool:
     t = (text or "").lower()
     return ("lycamobile.us/en/activate-sim" in t) or ("як активувати та поповнити сім-карту сша" in t)
@@ -513,7 +513,7 @@ def detect_qty_only(text: str) -> Optional[int]:
     except Exception:
         return None
 
-# ==== НОВЕ: евристика «в самому тексті є і країни, і кількості» (п.4) ====
+# ==== евристика «в самому тексті є і країни, і кількості» (п.4) ====
 COUNTRY_KEYWORDS: Dict[str, List[str]] = {
     "ВЕЛИКОБРИТАНІЯ": ["англ", "британ", "великобритан", "uk", "u.k", "great britain", "+44"],
     "ФРАНЦІЯ": ["франц", "france", "+33"],
@@ -555,13 +555,10 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
     mentions = _country_mentions_with_pos(text)
     if not mentions:
         return []
-
-    # 1) Пошук пар «число поруч із країною» (найближче число в ±20 символів)
     nums = [(m.group(0), m.start()) for m in NUM_POS_RE.finditer(text)]
     items: List[Tuple[str, int]] = []
     used_num_idx: Set[int] = set()
     used_country_idx: Set[int] = set()
-
     for ci, (country, cpos) in enumerate(mentions):
         best_idx = None
         best_dist = 9999
@@ -569,7 +566,7 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
             if ni in used_num_idx:
                 continue
             dist = abs(npos - cpos)
-            if dist <= 20 and dist < best_dist:  # близько
+            if dist <= 20 and dist < best_dist:
                 best_dist = dist
                 best_idx = ni
         if best_idx is not None:
@@ -577,8 +574,6 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
             items.append((country, qty))
             used_num_idx.add(best_idx)
             used_country_idx.add(ci)
-
-    # 2) Якщо є «по 10» та згадки кількох країн — застосувати одне число до всіх, що лишилися
     if len(items) == 0 or len(items) < len(mentions):
         m = PO_QTY_RE.search(text)
         if m:
@@ -586,8 +581,6 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
             for ci, (country, _) in enumerate(mentions):
                 if ci not in used_country_idx:
                     items.append((country, q))
-
-    # 3) Якщо знайшли хоч одну пару — це наш пункт 4
     return items
 
 # ==== СИСТЕМНІ ПРОМПТИ ====
@@ -692,7 +685,7 @@ def build_system_prompt() -> str:
 
         # === США — ОСОБЛИВО ===
         "США — на відміну від інших, потребують поповнення для активації. Після поповнення SIM працюватиме на прийом SMS.\n\n"
-        "Інструкцію надсилай дослівно (з відступами), якщо питають про США."
+        "Якщо користувача цікавить активація, поповнення або деталі використання SIM-карт США — ВІДПОВІДАЙ ЛИШЕ JSON-об'єктом: {\"ask_usa_activation\": true}"
     )
 
 def build_followup_prompt() -> str:
@@ -715,46 +708,6 @@ def build_force_point4_prompt() -> str:
         "Витягни пункт 4, поєднай з 1–3 з контексту і ПОВЕРНИ ЛИШЕ ПОВНИЙ JSON замовлення."
     )
 
-# ---- фільтр follow-up/«Ок/Дякую»
-ACK_PATTERNS = [
-    r"^\s*(ок(ей)?|добре|чудово|гарно|дякую!?|спасибі|спасибо|жду|чекаю|ок,?\s*жду|ок,?\s*чекаю)\s*[\.\!]*\s*$",
-    r"^\s*[👍🙏✅👌]+\s*$",
-]
-def is_ack_only(text: str) -> bool:
-    if not text:
-        return False
-    # Розширимо патерн для повідомлення "ух ты..."
-    if re.match(r"^\s*ух\s*ты\b", text.strip().lower()):
-        return True
-    low = text.strip().lower()
-    for p in ACK_PATTERNS:
-        if re.match(p, low):
-            return True
-    return False
-
-def is_meaningful_followup(text: str) -> bool:
-    t = (text or "").strip()
-    if not t:
-        return False
-    low = t.lower()
-    banned_words = ["ціни", "прайс", "надіслано", "див. вище", "вище", "повторю"]
-    if any(w in low for w in banned_words):
-        return False
-    if "грн" in low or re.search(r"\bшт\.?\b", low):
-        return False
-    availability_patterns = [
-        r"^підтверджую( наявність)?\.?$",
-        r"^є в наявності\.?$",
-        r"^в наявності\.?$",
-        r"^available\.?$",
-        r"^так, є\.?$",
-        r"^так\.?$",
-    ]
-    for p in availability_patterns:
-        if re.match(p, low):
-            return False
-    return len(t) >= 4
-
 def _ensure_history(ctx: ContextTypes.DEFAULT_TYPE) -> List[Dict[str, str]]:
     if "history" not in ctx.chat_data:
         ctx.chat_data["history"] = []
@@ -764,11 +717,7 @@ def _prune_history(history: List[Dict[str, str]]) -> None:
     if len(history) > MAX_TURNS * 2:
         del history[: len(history) - MAX_TURNS * 2]
 
-# ======== НОВЕ: GPT-парсер для повідомлень менеджера ========
-PAID_HINT_RE = re.compile(r"\b(без\s*нал|безнал|оплачено|передоплат|оплата\s*на\s*карт[уі])\b", re.IGNORECASE)
-
 def build_manager_parser_prompt() -> str:
-    # Створюємо список канонічних назв країн для інструкції
     country_keys = ", ".join(f'"{k}"' for k in PRICE_TIERS.keys())
     return (
         "Ти — сервіс для вилучення даних. Твоє завдання — розібрати неструктурований текст із даними замовлення та повернути їх у вигляді чіткого JSON-об'єкта.\n\n"
@@ -810,7 +759,7 @@ async def _ask_gpt_to_parse_manager_order(text: str) -> str:
             messages=messages,
             max_tokens=500,
             temperature=0.1,
-            response_format={"type": "json_object"} # Просимо GPT гарантувати JSON на виході
+            response_format={"type": "json_object"} 
         )
         return response.choices[0].message["content"]
     except Exception as e:
@@ -823,22 +772,17 @@ def try_parse_manager_order_json(json_text: str) -> Optional[OrderData]:
         return None
     try:
         data = json.loads(json_text)
-        # Перевірка наявності ключових полів
         if not all(k in data for k in ["full_name", "phone", "city", "np", "items"]):
             logger.warning("GPT-парсер повернув JSON без необхідних полів.")
             return None
-
         items = [OrderItem(
             country=i["country"],
             qty=int(i["qty"]),
             operator=i.get("operator")
         ) for i in data.get("items", [])]
-
-        # Перевірка, що хоча б якісь дані є
         if not data.get("full_name") and not data.get("phone") and not items:
             logger.info("GPT-парсер не знайшов жодних суттєвих даних у тексті.")
             return None
-
         return OrderData(
             full_name=data.get("full_name", "").strip(),
             phone=data.get("phone", "").strip(),
@@ -849,7 +793,6 @@ def try_parse_manager_order_json(json_text: str) -> Optional[OrderData]:
     except (json.JSONDecodeError, TypeError, KeyError, ValueError) as e:
         logger.warning(f"Не вдалося розпарсити JSON від GPT-парсера: {e}\nТекст: {json_text}")
         return None
-
 
 def render_order_for_group(order: OrderData, paid: bool) -> str:
     """
@@ -879,7 +822,6 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
                 counted += 1
                 line = f"{flag} {disp}, {it.qty} шт — {line_total} грн  \n"
         lines.append(line)
-
     header = (
         f"{format_full_name(order.full_name)} \n"
         f"{format_phone(order.phone)}\n"
@@ -890,7 +832,6 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
         footer = f"\nЗагальна сумма: {grand_total} грн\n"
     return header + "".join(lines) + footer
 
-# ==== OpenAI (основні функції) ====
 async def _openai_chat(messages: List[Dict[str, str]]) -> str:
     try:
         response = openai.ChatCompletion.create(
@@ -943,7 +884,6 @@ async def _ask_gpt_force_point4(history: List[Dict[str, str]], user_payload: str
         logger.error(f"Помилка force-point4 до OpenAI: {e}")
         return ""
 
-# ===== /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
@@ -953,56 +893,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Вітаю! Я допоможу вам оформити замовлення на SIM-карти, а також постараюсь надати відповіді на всі ваші запитання."
     )
 
-# ===== Обробка повідомлень =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
         logger.warning("No effective_message in update: %s", update)
         return
-
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
-
-    # Перевіряємо, чи це не просте повідомлення "дякую/ок" одразу після успішного замовлення.
     last_order_time = context.chat_data.get("last_order_time", 0)
     if is_ack_only(raw_user_message) and (time.time() - last_order_time) < ORDER_DUP_WINDOW_SEC:
         logger.info(f"Проігноровано ACK повідомлення після замовлення: '{raw_user_message}'")
         return
 
-    # --- НОВЕ: обробка повідомлень від менеджера в групі через GPT ---
     if (
         msg.chat and msg.chat.id == ORDER_FORWARD_CHAT_ID
         and msg.from_user and msg.from_user.username
         and msg.from_user.username.lower() == (DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()
     ):
-        # Відправляємо текст на парсинг до GPT
         json_response_str = await _ask_gpt_to_parse_manager_order(raw_user_message)
         parsed_order = try_parse_manager_order_json(json_response_str)
-
         if parsed_order:
-            # Визначаємо, чи було замовлення оплачене
             paid_flag = bool(PAID_HINT_RE.search(raw_user_message))
-            
-            # Спробуємо видалити оригінальне повідомлення менеджера
             try:
                 await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
             except Exception as e:
                 logger.warning(f"Не вдалося видалити повідомлення менеджера: {e}")
-            
-            # Надсилаємо структурований підсумок
             formatted = render_order_for_group(parsed_order, paid=paid_flag)
             await context.bot.send_message(chat_id=msg.chat.id, text=formatted)
             return
         else:
-            # Якщо GPT не зміг розпарсити, логуємо і нічого не робимо
             logger.info("GPT-парсер не зміг структурувати повідомлення менеджера.")
-            # Можна додати видалення, якщо ви не хочете, щоб невдалі повідомлення залишались
-            # try:
-            #     await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
-            # except: pass
             return
 
-    # Якщо пише менеджер (в іншому чаті) — НЕ відповідаємо, але додаємо в history як контекст
     if _is_manager_message(msg):
         text = (msg.text or msg.caption or "").strip()
         if text:
@@ -1010,7 +932,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _prune_history(history)
         return
 
-    # Додаємо процитований текст (reply) як частину навантаження
     quoted_text = extract_quoted_text(msg)
     user_payload = raw_user_message
     if quoted_text:
@@ -1020,7 +941,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + quoted_text
         )
 
-    # === КЕЙС 1: тільки кількість після прайсу (було раніше) ===
     last_price_countries: Optional[List[str]] = context.chat_data.get("last_price_countries")
     qty_only = detect_qty_only(raw_user_message)
     if qty_only and last_price_countries:
@@ -1033,7 +953,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data["awaiting_missing"] = {1, 2, 3}
         context.chat_data["point4_hint"] = {"qty": qty_only, "countries": last_price_countries, "ts": time.time()}
 
-    # === КЕЙС 2: у повідомленні одночасно є країни+кількості (НОВЕ) ===
     p4_items = detect_point4_items(raw_user_message)
     if p4_items:
         pairs_text = "; ".join(f"{DISPLAY.get(c, c.title())} — {q}" for c, q in p4_items)
@@ -1044,7 +963,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data["awaiting_missing"] = {1, 2, 3}
         context.chat_data["point4_hint"] = {"items": p4_items, "ts": time.time()}
 
-    # Якщо ми вже чекаємо 1–3 і є підказка за п.4 — дублюємо її в payload, щоб GPT точно склеїв
     if context.chat_data.get("awaiting_missing") == {1, 2, 3} and context.chat_data.get("point4_hint"):
         h = context.chat_data["point4_hint"]
         if "qty" in h and "countries" in h:
@@ -1060,27 +978,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Додай/склей із пунктами 1–3.]"
             )
 
-    # Якщо до цього бракувало САМЕ п.4 — пробуємо force-point4
     awaiting = context.chat_data.get("awaiting_missing")
     if awaiting == {4}:
         force_json = await _ask_gpt_force_point4(history, user_payload)
         forced = try_parse_order_json(force_json)
-        if forced and forced.items and forced.full_name and forced.phone and forced.city and forced.np:
+        if forced and forced.items and all([forced.full_name, forced.phone, forced.city, forced.np]):
             summary = render_order(forced)
             sig = _order_signature(forced)
             context.chat_data["last_order_sig"] = sig
             context.chat_data["last_order_time"] = time.time()
             context.chat_data.pop("awaiting_missing", None)
             context.chat_data.pop("point4_hint", None)
-
             history.append({"role": "user", "content": raw_user_message})
             history.append({"role": "assistant", "content": summary})
             _prune_history(history)
-
             await msg.reply_text(summary)
             await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
-
-            # ---> Дублікат у групу
             try:
                 username = update.effective_user.username
                 forward_text = f"@{username}\n{summary}" if username else summary
@@ -1091,16 +1004,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
             return
-        # якщо не вийшло — ідемо звичайним шляхом
-
-    # 1) Основний виклик GPT
+    
     reply_text = await _ask_gpt_main(history, user_payload)
 
-    # Уніфікуємо заголовок
     if "Залишилось вказати:" in reply_text and "📝 Залишилось вказати:" not in reply_text:
         reply_text = reply_text.replace("Залишилось вказати:", "📝 Залишилось вказати:")
 
-    # Якщо GPT все одно повернув повний чек-лист, а ми вже дали п.4 — скоригуємо підказку для користувача
     if reply_text.strip().startswith("🛒 Для оформлення замовлення") and context.chat_data.get("awaiting_missing") == {1, 2, 3}:
         reply_text = (
             "📝 Залишилось вказати:\n\n"
@@ -1109,9 +1018,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3. Місто та № відділення \"Нової Пошти\".\n"
         )
 
-    # 2) Якщо прийшов JSON повного замовлення — парсимо
+    if try_parse_usa_activation_json(reply_text):
+        history.append({"role": "user", "content": raw_user_message})
+        history.append({"role": "assistant", "content": US_ACTIVATION_MSG})
+        _prune_history(history)
+        await msg.reply_text(US_ACTIVATION_MSG)
+        return
+
     parsed = try_parse_order_json(reply_text)
-    if parsed and parsed.items and parsed.full_name and parsed.phone and parsed.city and parsed.np:
+    if parsed and parsed.items and all([parsed.full_name, parsed.phone, parsed.city, parsed.np]):
         current_sig = _order_signature(parsed)
         last_sig = context.chat_data.get("last_order_sig")
         last_time = context.chat_data.get("last_order_time", 0)
@@ -1121,21 +1036,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop("awaiting_missing", None)
             context.chat_data.pop("point4_hint", None)
             return
-
         summary = render_order(parsed)
         context.chat_data["last_order_sig"] = current_sig
         context.chat_data["last_order_time"] = time.time()
         context.chat_data.pop("awaiting_missing", None)
         context.chat_data.pop("point4_hint", None)
-
         history.append({"role": "user", "content": raw_user_message})
         history.append({"role": "assistant", "content": summary})
         _prune_history(history)
-
         await msg.reply_text(summary)
         await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
-
-        # ---> Дублікат у групу
         try:
             username = update.effective_user.username
             forward_text = f"@{username}\n{summary}" if username else summary
@@ -1147,7 +1057,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
         return
 
-    # 3) Режим цін/наявності
     price_countries = try_parse_price_json(reply_text)
     if price_countries is not None:
         want_all = any(str(c).upper() == "ALL" for c in price_countries)
@@ -1155,13 +1064,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         valid = [k for k in normalized if k in PRICE_TIERS]
         invalid = [price_countries[i] for i, k in enumerate(normalized)
                    if k not in PRICE_TIERS and str(price_countries[i]).upper() != "ALL"]
-
-        # ЗАПАМ’ЯТОВУЄМО, ДЛЯ ЯКИХ КРАЇН ПОКАЗАЛИ ПРАЙС
         if want_all:
             context.chat_data["last_price_countries"] = list(PRICE_TIERS.keys())
         else:
             context.chat_data["last_price_countries"] = valid[:] if valid else []
-
         if want_all:
             price_msg = "".join(render_price_block(k) for k in PRICE_TIERS.keys())
             history.append({"role": "user", "content": raw_user_message})
@@ -1182,17 +1088,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history.append({"role": "assistant", "content": unavailable_msg})
             _prune_history(history)
             await msg.reply_text(unavailable_msg)
-
-        # США — автододаткова інструкція
-        usa_intent = (("США" in valid) and (len(valid) == 1 or user_mentions_usa(raw_user_message)))
-        if usa_intent:
-            await msg.reply_text(US_ACTIVATION_MSG)
-
-        # follow-up: USSD або коротка відповідь
+        
         follow = await _ask_gpt_followup(history, user_payload)
-        ussd_targets = try_parse_ussd_json(follow)
-        if ussd_targets:
-            formatted = render_ussd_targets(ussd_targets) or FALLBACK_PLASTIC_MSG
+        ussd_targets_followup = try_parse_ussd_json(follow)
+        if ussd_targets_followup:
+            formatted = render_ussd_targets(ussd_targets_followup) or FALLBACK_PLASTIC_MSG
             history.append({"role": "assistant", "content": formatted})
             _prune_history(history)
             context.chat_data.pop("awaiting_missing", None)
@@ -1204,11 +1104,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 history.append({"role": "assistant", "content": follow})
                 _prune_history(history)
                 await msg.reply_text(follow)
-
         context.chat_data.pop("awaiting_missing", None)
         return
 
-    # 4) Якщо GPT одразу повернув USSD JSON — рендеримо
     ussd_targets = try_parse_ussd_json(reply_text)
     if ussd_targets:
         formatted = render_ussd_targets(ussd_targets) or FALLBACK_PLASTIC_MSG
@@ -1220,7 +1118,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(formatted)
         return
 
-    # 5) Якщо GPT сказав, що бракує ЛИШЕ пункту 4 — запам’ятовуємо стан для наступного повідомлення
     missing = missing_points_from_reply(reply_text)
     if missing == {4}:
         context.chat_data["awaiting_missing"] = {4}
@@ -1229,27 +1126,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         if context.chat_data.get("awaiting_missing") != {1, 2, 3}:
             context.chat_data.pop("awaiting_missing", None)
-
-    # 6) Інакше — звичайна відповідь моделі
     history.append({"role": "user", "content": raw_user_message})
     history.append({"role": "assistant", "content": reply_text})
     _prune_history(history)
     await msg.reply_text(reply_text)
 
-# ===== Error handler =====
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Exception while handling update: %s", update, exc_info=context.error)
 
-# ===== Запуск програми =====
 def main():
     if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not WEBHOOK_URL:
         raise RuntimeError("Не задано TELEGRAM_BOT_TOKEN, OPENAI_API_KEY або WEBHOOK_URL")
-
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
-
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
