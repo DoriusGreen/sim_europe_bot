@@ -768,14 +768,16 @@ def build_manager_parser_prompt() -> str:
         "- Номер телефону.\n"
         "- Місто та номер відділення «Нової Пошти».\n"
         "- Перелік замовлених SIM-карт (країна та кількість).\n"
+        "- Назву оператора (напр. Three, Lebara, O2, Vodafone), зазвичай для Великобританії. Можуть вказуватись кирилицею, чи скорочено.\n"
         "- Сторонні коментарі, які потрібно ігнорувати.\n\n"
         "Правила:\n"
         "1. Твоя відповідь має бути ТІЛЬКИ JSON-об'єктом. Без жодних пояснень, тексту до чи після, чи markdown-форматування.\n"
         "2. Для країн використовуй СУВОРО канонічні назви з цього списку: " + country_keys + ".\n"
-        "3. Поля `full_name`, `phone`, `city`, `np` мають бути рядками. Поле `items` — масивом об'єктів.\n"
-        "4. Якщо якісь дані відсутні в тексті, залиш відповідне поле як порожній рядок \"\" або порожній масив [].\n\n"
+        "3. Якщо для країни ВЕЛИКОБРИТАНІЯ (Англія) вказаний оператор (напр. O2, Lebara, Vodafone), додай в об'єкт товару поле `\"operator\"`. Використовуй канонічне значення: `\"O2\"`, `\"Lebara\"`, `\"Vodafone\"`. Якщо оператор не вказаний, не додавай це поле.\n"
+        "4. Поля `full_name`, `phone`, `city`, `np` мають бути рядками. Поле `items` — масивом об'єктів.\n"
+        "5. Якщо якісь дані відсутні в тексті, залиш відповідне поле як порожній рядок \"\" або порожній масив [].\n\n"
         "Приклад:\n"
-        "Вхідний текст: 'Так, це новий клієнт, Іван Франко, тел 0991234567. Хоче 2 сімки для Англії та 1 для США. Відправка в Київ, відділення 30. Каже, що оплатить на карту.'\n"
+        "Вхідний текст: 'Так, це новий клієнт, Іван Франко, тел 0991234567. Хоче 2 сімки для Англії оператора водафон та 1 для США. Відправка в Київ, відділення 30. Каже, що оплатить на карту.'\n"
         "Твоя відповідь (лише цей JSON):\n"
         "{\n"
         '  "full_name": "Іван Франко",\n'
@@ -783,11 +785,12 @@ def build_manager_parser_prompt() -> str:
         '  "city": "Київ",\n'
         '  "np": "30",\n'
         '  "items": [\n'
-        '    {"country": "ВЕЛИКОБРИТАНІЯ", "qty": 2},\n'
+        '    {"country": "ВЕЛИКОБРИТАНІЯ", "qty": 2, "operator": "Vodafone"},\n'
         '    {"country": "США", "qty": 1}\n'
         '  ]\n'
         "}"
     )
+
 
 async def _ask_gpt_to_parse_manager_order(text: str) -> str:
     """Використовує GPT для парсингу хаотичного тексту від менеджера в JSON."""
@@ -939,6 +942,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ===== Обробка повідомлень =====
+PRICE_LINE_RE = re.compile(r"— (\d+ грн|договірна)")
+TOTAL_LINE_RE = re.compile(r"^Загальна сумма: \d+ грн")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
@@ -951,11 +957,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Проігноровано ACK повідомлення після замовлення: '{raw_user_message}'")
         return
 
+    # Обробка команд менеджера в групі
     if (
         msg.chat and msg.chat.id == ORDER_FORWARD_CHAT_ID
         and msg.from_user and msg.from_user.username
         and msg.from_user.username.lower() == (DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()
     ):
+        # Нова логіка: Обробка reply-повідомлення про оплату
+        is_paid_reply = bool(PAID_HINT_RE.search(raw_user_message))
+        if msg.reply_to_message and is_paid_reply:
+            original_text = msg.reply_to_message.text or ""
+            modified_lines = []
+            for line in original_text.splitlines():
+                if TOTAL_LINE_RE.search(line):
+                    continue  # Видаляємо рядок "Загальна сумма"
+                modified_line = PRICE_LINE_RE.sub("— (замовлення оплачене)", line)
+                modified_lines.append(modified_line)
+            
+            final_text = "\n".join(modified_lines)
+
+            try:
+                await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+            except Exception as e:
+                logger.warning(f"Не вдалося видалити повідомлення менеджера: {e}")
+            
+            await context.bot.send_message(chat_id=msg.chat.id, text=final_text)
+            return
+
+        # Стара логіка: Парсинг тексту менеджера для нового замовлення
         json_response_str = await _ask_gpt_to_parse_manager_order(raw_user_message)
         parsed_order = try_parse_manager_order_json(json_response_str)
         if parsed_order:
@@ -968,9 +997,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=msg.chat.id, text=formatted)
             return
         else:
-            logger.info("GPT-парсер не зміг структурувати повідомлення менеджера.")
+            logger.info("GPT-парсер не зміг структурувати повідомлення менеджера (або це не команда на створення замовлення).")
             return
 
+    # Обробка повідомлень від клієнтів (далі без змін)
     if _is_manager_message(msg):
         text = (msg.text or msg.caption or "").strip()
         if text:
