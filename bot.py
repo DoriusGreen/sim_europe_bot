@@ -1,4 +1,3 @@
-# bot.py
 import os
 import time
 import logging
@@ -172,6 +171,8 @@ def canonical_operator(op: Optional[str]) -> Optional[str]:
         return "Lebara"
     if o in ("vodafone", "водафон", "водофон"):
         return "Vodafone"
+    if o in ("three", "трі", "3"):
+        return "Three"
     return None
 
 # ---------- ОПЕРАТОРИ ДЛЯ USSD (довідка) ----------
@@ -773,7 +774,7 @@ def build_manager_parser_prompt() -> str:
         "Правила:\n"
         "1. Твоя відповідь має бути ТІЛЬКИ JSON-об'єктом. Без жодних пояснень, тексту до чи після, чи markdown-форматування.\n"
         "2. Для країн використовуй СУВОРО канонічні назви з цього списку: " + country_keys + ".\n"
-        "3. Якщо для країни ВЕЛИКОБРИТАНІЯ (Англія) вказаний оператор (напр. O2, Lebara, Vodafone), додай в об'єкт товару поле `\"operator\"`. Використовуй канонічне значення: `\"O2\"`, `\"Lebara\"`, `\"Vodafone\"`. Якщо оператор не вказаний, не додавай це поле.\n"
+        "3. Якщо для країни ВЕЛИКОБРИТАНІЯ (Англія) вказаний оператор (напр. O2, Lebara, Vodafone, Three), додай в об'єкт товару поле `\"operator\"`. Використовуй канонічне значення: `\"O2\"`, `\"Lebara\"`, `\"Vodafone\"`, `\"Three\"`. Якщо оператор не вказаний, не додавай це поле.\n"
         "4. Поля `full_name`, `phone`, `city`, `np` мають бути рядками. Поле `items` — масивом об'єктів.\n"
         "5. Якщо якісь дані відсутні в тексті, залиш відповідне поле як порожній рядок \"\" або порожній масив [].\n\n"
         "Приклад:\n"
@@ -791,7 +792,6 @@ def build_manager_parser_prompt() -> str:
         "}"
     )
 
-
 async def _ask_gpt_to_parse_manager_order(text: str) -> str:
     """Використовує GPT для парсингу хаотичного тексту від менеджера в JSON."""
     messages = [
@@ -799,7 +799,7 @@ async def _ask_gpt_to_parse_manager_order(text: str) -> str:
         {"role": "user", "content": text}
     ]
     try:
-        response = openai.ChatCompletion.create(
+        response = await openai.ChatCompletion.acreate(
             model="gpt-4o",
             messages=messages,
             max_tokens=500,
@@ -881,7 +881,7 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
 # ==== OpenAI (основні функції) ====
 async def _openai_chat(messages: List[Dict[str, str]]) -> str:
     try:
-        response = openai.ChatCompletion.create(
+        response = await openai.ChatCompletion.acreate(
             model="gpt-4o",
             messages=messages,
             max_tokens=600,
@@ -904,7 +904,7 @@ async def _ask_gpt_followup(history: List[Dict[str, str]], user_payload: str) ->
     messages.extend(tail)
     messages.append({"role": "user", "content": user_payload})
     try:
-        response = openai.ChatCompletion.create(
+        response = await openai.ChatCompletion.acreate(
             model="gpt-4o",
             messages=messages,
             max_tokens=300,
@@ -920,7 +920,7 @@ async def _ask_gpt_force_point4(history: List[Dict[str, str]], user_payload: str
     messages.extend(history)
     messages.append({"role": "user", "content": user_payload})
     try:
-        response = openai.ChatCompletion.create(
+        response = await openai.ChatCompletion.acreate(
             model="gpt-4o",
             messages=messages,
             max_tokens=500,
@@ -963,28 +963,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and msg.from_user and msg.from_user.username
         and msg.from_user.username.lower() == (DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()
     ):
-        # Нова логіка: Обробка reply-повідомлення про оплату
-        is_paid_reply = bool(PAID_HINT_RE.search(raw_user_message))
-        if msg.reply_to_message and is_paid_reply:
+        # Логіка обробки реплаїв від менеджера
+        if msg.reply_to_message:
+            is_paid_reply = bool(PAID_HINT_RE.search(raw_user_message))
+            operator_reply = canonical_operator(raw_user_message)
+            original_msg_id = msg.reply_to_message.message_id
             original_text = msg.reply_to_message.text or ""
-            modified_lines = []
-            for line in original_text.splitlines():
-                if TOTAL_LINE_RE.search(line):
-                    continue  # Видаляємо рядок "Загальна сумма"
-                modified_line = PRICE_LINE_RE.sub("— (замовлення оплачене)", line)
-                modified_lines.append(modified_line)
             
-            final_text = "\n".join(modified_lines)
+            # Сценарій 1: Менеджер відповів "без нал" (або синонім)
+            if is_paid_reply:
+                modified_lines = []
+                for line in original_text.splitlines():
+                    if TOTAL_LINE_RE.search(line):
+                        continue
+                    modified_line = PRICE_LINE_RE.sub("— (замовлення оплачене)", line)
+                    modified_lines.append(modified_line)
+                final_text = "\n".join(modified_lines)
+                try:
+                    await context.bot.delete_message(chat_id=msg.chat.id, message_id=original_msg_id)
+                    await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+                except Exception as e:
+                    logger.warning(f"Не вдалося видалити повідомлення при обробці оплати: {e}")
+                await context.bot.send_message(chat_id=msg.chat.id, text=final_text)
+                return
 
-            try:
-                await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
-            except Exception as e:
-                logger.warning(f"Не вдалося видалити повідомлення менеджера: {e}")
-            
-            await context.bot.send_message(chat_id=msg.chat.id, text=final_text)
-            return
+            # Сценарій 2: Менеджер відповів назвою оператора
+            elif operator_reply:
+                modified_lines = []
+                found_uk = False
+                for line in original_text.splitlines():
+                    if ("Англія" in line or "ВЕЛИКОБРИТАНІЯ" in line) and "оператор" not in line:
+                        # Вставляємо оператора після назви країни
+                        line = line.replace(",", f" (оператор {operator_reply}),", 1)
+                        found_uk = True
+                    modified_lines.append(line)
+                
+                if found_uk:
+                    final_text = "\n".join(modified_lines)
+                    try:
+                        await context.bot.delete_message(chat_id=msg.chat.id, message_id=original_msg_id)
+                        await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+                    except Exception as e:
+                        logger.warning(f"Не вдалося видалити повідомлення при додаванні оператора: {e}")
+                    await context.bot.send_message(chat_id=msg.chat.id, text=final_text)
+                    return
 
-        # Стара логіка: Парсинг тексту менеджера для нового замовлення
+        # Логіка створення нового замовлення з тексту (якщо це не реплай)
         json_response_str = await _ask_gpt_to_parse_manager_order(raw_user_message)
         parsed_order = try_parse_manager_order_json(json_response_str)
         if parsed_order:
