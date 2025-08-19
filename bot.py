@@ -711,14 +711,12 @@ def build_force_point4_prompt() -> str:
 
 # ---- фільтр follow-up/«Ок/Дякую»
 ACK_PATTERNS = [
-    r"^\s*(ок(ей)?|добре|чудово|гарно|дякую!?|спасибі|спасибо|жду|чекаю|ок,?\s*жду|ок,?\s*чекаю)\s*[\.\!]*\s*$",
+    r"^\s*(ок(ей)?|добре|чудово|гарно|дякую!?|спасибі|спасибо|жду|чекаю|ок,?\s*жду|ок,?\s*чекаю|ого|ух\s*ты)\s*[\.\!]*\s*$",
     r"^\s*[👍🙏✅👌]+\s*$",
 ]
 def is_ack_only(text: str) -> bool:
     if not text:
         return False
-    if re.match(r"^\s*ух\s*ты\b", text.strip().lower()):
-        return True
     low = text.strip().lower()
     for p in ACK_PATTERNS:
         if re.match(p, low):
@@ -952,10 +950,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
-    last_order_time = context.chat_data.get("last_order_time", 0)
-    if is_ack_only(raw_user_message) and (time.time() - last_order_time) < ORDER_DUP_WINDOW_SEC:
-        logger.info(f"Проігноровано ACK повідомлення після замовлення: '{raw_user_message}'")
-        return
+    
+    # Видалено фільтр is_ack_only. Всі повідомлення йдуть на обробку.
 
     # Обробка команд менеджера в групі
     if (
@@ -1131,8 +1127,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_sig = context.chat_data.get("last_order_sig")
         last_time = context.chat_data.get("last_order_time", 0)
         if last_sig and current_sig == last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC):
-            if not is_ack_only(raw_user_message):
-                await msg.reply_text("Замовлення вже прийнято, дякуємо! Якщо буде ще щось — пишіть 🙂")
+            # Оскільки фільтр is_ack_only видалено, додамо перевірку, щоб не спамити, якщо GPT повернув те саме замовлення на "дякую"
+            logger.info(f"Проігноровано дублікат замовлення, ймовірно, на ACK-повідомлення: '{raw_user_message}'")
             context.chat_data.pop("awaiting_missing", None)
             context.chat_data.pop("point4_hint", None)
             return
@@ -1226,10 +1222,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         if context.chat_data.get("awaiting_missing") != {1, 2, 3}:
             context.chat_data.pop("awaiting_missing", None)
-    history.append({"role": "user", "content": raw_user_message})
-    history.append({"role": "assistant", "content": reply_text})
-    _prune_history(history)
-    await msg.reply_text(reply_text)
+    
+    # Захист від відправки пустої відповіді від GPT
+    if reply_text:
+        history.append({"role": "user", "content": raw_user_message})
+        history.append({"role": "assistant", "content": reply_text})
+        _prune_history(history)
+        await msg.reply_text(reply_text)
+    else:
+        logger.info(f"GPT повернув пусту відповідь на повідомлення: '{raw_user_message}'. Відповідь не надіслано.")
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Exception while handling update: %s", update, exc_info=context.error)
