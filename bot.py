@@ -247,8 +247,8 @@ def render_unavailable(unavail: List[str]) -> str:
     if not names:
         return ""
     if len(names) == 1:
-        return f"На жаль, {names[0]} SIM-карти наразі недоступні.\nУ наявності: {available_list_text()}."
-    return f"На жаль, {', '.join(names)} наразі недоступні.\nУ наявності: {available_list_text()}."
+        return f"На жаль, {names[0]} SIM-карти наразі недоступні. У наявності: {available_list_text()}."
+    return f"На жаль, {', '.join(names)} наразі недоступні. У наявності: {available_list_text()}."
 
 # ==== Форматування ПІДСУМКУ ====
 def _cap_word(w: str) -> str:
@@ -960,15 +960,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
     
-    # Виправлення: Повертаємо фільтр для повідомлень-підтверджень (ACK),
-    # але робимо його умовним. Він спрацьовує (ігнорує повідомлення),
-    # тільки якщо бот НЕ перебуває в активному стані збору даних для замовлення
-    # (тобто, коли `awaiting_missing` не встановлено). Це запобігає
-    # недоречним повторним запитам даних у відповідь на короткі, неоднозначні
-    # повідомлення ("ок", "дякую", "да") поза контекстом оформлення замовлення.
-    if is_ack_only(raw_user_message) and not context.chat_data.get("awaiting_missing"):
-        logger.info(f"Проігноровано ACK-повідомлення поза процесом замовлення: '{raw_user_message}'")
-        return
+    # Видалено фільтр is_ack_only. Всі повідомлення йдуть на обробку.
 
     # Обробка команд менеджера в групі
     if (
