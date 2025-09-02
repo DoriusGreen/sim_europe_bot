@@ -247,8 +247,8 @@ def render_unavailable(unavail: List[str]) -> str:
     if not names:
         return ""
     if len(names) == 1:
-        return f"На жаль, {names[0]} SIM-карти наразі недоступні. У наявності: {available_list_text()}."
-    return f"На жаль, {', '.join(names)} наразі недоступні. У наявності: {available_list_text()}."
+        return f"На жаль, {names[0]} SIM-карти наразі недоступні.\nУ наявності: {available_list_text()}."
+    return f"На жаль, {', '.join(names)} наразі недоступні.\nУ наявності: {available_list_text()}."
 
 # ==== Форматування ПІДСУМКУ ====
 def _cap_word(w: str) -> str:
