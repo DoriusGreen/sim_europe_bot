@@ -1014,7 +1014,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
         # Логіка створення нового замовлення з тексту (якщо це не реплай)
-        json_response_str = await _ask_gpt_to_parse_manager_order(raw_user_message)
+        # --- ПОЧАТОК ЗМІН ---
+        note_text = None
+        text_for_gpt = raw_user_message
+
+        parts = re.split(r'\bпримітка[:\s]*', raw_user_message, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) > 1:
+            text_for_gpt = parts[0]
+            note_text = parts[1].strip()
+
+        json_response_str = await _ask_gpt_to_parse_manager_order(text_for_gpt)
         parsed_order = try_parse_manager_order_json(json_response_str)
         if parsed_order:
             paid_flag = bool(PAID_HINT_RE.search(raw_user_message))
@@ -1022,9 +1031,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
             except Exception as e:
                 logger.warning(f"Не вдалося видалити повідомлення менеджера: {e}")
-            formatted = render_order_for_group(parsed_order, paid=paid_flag)
+
+            formatted = render_order_for_group(parsed_order, paid=paid_flag).strip()
+            
+            if note_text:
+                formatted += f"\n\n⚠️ Примітка: {note_text}"
+
             await context.bot.send_message(chat_id=msg.chat.id, text=formatted)
             return
+        # --- КІНЕЦЬ ЗМІН ---
         else:
             logger.info("GPT-парсер не зміг структурувати повідомлення менеджера (або це не команда на створення замовлення).")
             return
