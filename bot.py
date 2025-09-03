@@ -313,7 +313,6 @@ def _order_signature(order: OrderData) -> str:
     )
     return f"{format_full_name(order.full_name)}|{format_phone(order.phone)}|{format_city(order.city)}|{format_np(order.np)}|{items_sig}"
 
-# --- ПОЧАТОК ЗМІН ---
 def render_order(order: OrderData) -> str:
     lines = []
     grand_total = 0
@@ -358,7 +357,6 @@ def render_order(order: OrderData) -> str:
     body = "".join(lines) + "\n"
     footer = f"Загальна сумма: {grand_total} грн\n" if counted_countries >= 2 else ""
     return header + body + footer
-# --- КІНЕЦЬ ЗМІН ---
 
 # ==== JSON парсери ====
 ORDER_JSON_RE = re.compile(r"\{[\s\S]*\}")
@@ -863,7 +861,6 @@ def try_parse_manager_order_json(json_text: str) -> Optional[OrderData]:
         logger.warning(f"Не вдалося розпарсити JSON від GPT-парсера: {e}\nТекст: {json_text}")
         return None
 
-# --- ПОЧАТОК ЗМІН ---
 def render_order_for_group(order: OrderData, paid: bool) -> str:
     """
     Спеціальний рендер для групи: без «дякуємо» та, якщо paid=True, замість ціни пише '(замовлення оплачене)'.
@@ -911,7 +908,6 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
     if not paid and counted >= 2:
         footer = f"\nЗагальна сумма: {grand_total} грн\n"
     return header + "".join(lines) + footer
-# --- КІНЕЦЬ ЗМІН ---
 
 # ==== OpenAI (основні функції) ====
 async def _openai_chat(messages: List[Dict[str, str]]) -> str:
@@ -987,6 +983,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     raw_user_message = msg.text.strip() if msg.text else ""
     history = _ensure_history(context)
+
+    # --- ПОЧАТОК ЗМІН ---
+    # Перевірка на "чистку" історії після попереднього замовлення
+    if context.chat_data.get('order_just_completed'):
+        context.chat_data['history'] = []
+        history = context.chat_data['history']
+        context.chat_data.pop('order_just_completed', None)
+        logger.info(f"Розпочато нову розмову з {msg.chat.id}. Історію очищено.")
+    # --- КІНЕЦЬ ЗМІН ---
     
     # Видалено фільтр is_ack_only. Всі повідомлення йдуть на обробку.
 
@@ -1149,6 +1154,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as e:
                 logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
+            
+            # --- ПОЧАТОК ЗМІН ---
+            context.chat_data['order_just_completed'] = True
+            # --- КІНЕЦЬ ЗМІН ---
             return
     
     reply_text = await _ask_gpt_main(history, user_payload)
@@ -1171,15 +1180,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(US_ACTIVATION_MSG)
         return
 
-    # --- ПОЧАТОК ЗМІН ---
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and all([parsed.full_name, parsed.phone, parsed.city]):
-    # --- КІНЕЦЬ ЗМІН ---
         current_sig = _order_signature(parsed)
         last_sig = context.chat_data.get("last_order_sig")
         last_time = context.chat_data.get("last_order_time", 0)
         if last_sig and current_sig == last_sig and (time.time() - last_time <= ORDER_DUP_WINDOW_SEC):
-            # Оскільки фільтр is_ack_only видалено, додамо перевірку, щоб не спамити, якщо GPT повернув те саме замовлення на "дякую"
             logger.info(f"Проігноровано дублікат замовлення, ймовірно, на ACK-повідомлення: '{raw_user_message}'")
             context.chat_data.pop("awaiting_missing", None)
             context.chat_data.pop("point4_hint", None)
@@ -1203,6 +1209,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.warning(f"Не вдалося надіслати замовлення в групу: {e}")
+        
+        # --- ПОЧАТОК ЗМІН ---
+        context.chat_data['order_just_completed'] = True
+        # --- КІНЕЦЬ ЗМІН ---
         return
 
     price_countries = try_parse_price_json(reply_text)
