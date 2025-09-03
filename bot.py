@@ -313,6 +313,7 @@ def _order_signature(order: OrderData) -> str:
     )
     return f"{format_full_name(order.full_name)}|{format_phone(order.phone)}|{format_city(order.city)}|{format_np(order.np)}|{items_sig}"
 
+# --- ПОЧАТОК ЗМІН ---
 def render_order(order: OrderData) -> str:
     lines = []
     grand_total = 0
@@ -340,14 +341,24 @@ def render_order(order: OrderData) -> str:
             flag=flag, disp=disp, qty=it.qty, line_total=line_total_str
         ))
 
+    # Умовне форматування адреси
+    if order.np and order.np.strip():
+        # Стандартна доставка на відділення
+        address_line = f"{format_city(order.city)} № {format_np(order.np)}"
+    else:
+        # Кур'єрська/адресна доставка
+        raw_address = order.city.strip()
+        address_line = f"📫: {raw_address}"
+
     header = (
         f"{format_full_name(order.full_name)} \n"
         f"{format_phone(order.phone)}\n"
-        f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
+        f"{address_line}  \n\n"
     )
     body = "".join(lines) + "\n"
     footer = f"Загальна сумма: {grand_total} грн\n" if counted_countries >= 2 else ""
     return header + body + footer
+# --- КІНЕЦЬ ЗМІН ---
 
 # ==== JSON парсери ====
 ORDER_JSON_RE = re.compile(r"\{[\s\S]*\}")
@@ -584,6 +595,7 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
     return items
 
 # ==== СИСТЕМНІ ПРОМПТИ ====
+# --- ПОЧАТОК ЗМІН ---
 def build_system_prompt() -> str:
     return (
          # === РОЛЬ ТА КОНТЕКСТ ===
@@ -600,7 +612,9 @@ def build_system_prompt() -> str:
         "ПОВНЕ замовлення складається з 4 пунктів:\n"
         "1. Ім'я та прізвище (Не плутай ім'я клієнта з по-батькові! Записуй лише імя та прізвище.).\n"
         "2. Номер телефону.\n"
-        "3. Місто та № відділення «Нової Пошти».\n"
+        "3. Адреса доставки. Це може бути один з двох варіантів:\n"
+        "   - Місто та № відділення «Нової Пошти».\n"
+        "   - Повна адреса для кур'єрської доставки (вулиця, будинок, квартира). Якщо бачиш слова 'кв', 'офіс', 'адресна', 'курєрська' або повну адресу, вважай це кур'єрською доставкою.\n"
         "4. Країна(и) та кількість sim-карт.\n\n"
 
         # === ЯК ПИТАТИ ПРО НЕСТАЧУ ДАНИХ ===
@@ -619,10 +633,12 @@ def build_system_prompt() -> str:
         "{\n"
         '  "full_name": "Імʼя Прізвище",\n'
         '  "phone": "0XX-XXXX-XXX",\n'
-        '  "city": "Місто",\n'
+        '  "city": "Місто або Повна Адреса",\n'
         '  "np": "Номер відділення або поштомат",\n'
         '  "items": [ {"country":"КРАЇНА","qty":N,"operator":"O2|Lebara|Vodafone"}, ... ]\n'
-        "}\n\n"
+        "}\n"
+        "Правила для адреси в JSON: Для доставки на відділення, заповнюй 'city' та 'np'. Для кур'єрської доставки, записуй повну адресу в поле 'city' і залишай поле 'np' порожнім.\n\n"
+
 
         # === ПРАЙС/НАЯВНІСТЬ ===
         "Якщо користувач запитує ПРО ЦІНИ або про наявність — ВІДПОВІДАЙ ЛИШЕ JSON:\n"
@@ -697,6 +713,7 @@ def build_system_prompt() -> str:
         "Інструкцію надсилай дослівно (з відступами), якщо питають про США.\n"
         "Якщо користувача цікавить активація, поповнення або деталі використання SIM-карт США — ВІДПОВІДАЙ ЛИШЕ JSON-об'єктом: {\"ask_usa_activation\": true}"
     )
+# --- КІНЕЦЬ ЗМІН ---
 
 def build_followup_prompt() -> str:
     return (
@@ -846,7 +863,7 @@ def try_parse_manager_order_json(json_text: str) -> Optional[OrderData]:
         logger.warning(f"Не вдалося розпарсити JSON від GPT-парсера: {e}\nТекст: {json_text}")
         return None
 
-
+# --- ПОЧАТОК ЗМІН ---
 def render_order_for_group(order: OrderData, paid: bool) -> str:
     """
     Спеціальний рендер для групи: без «дякуємо» та, якщо paid=True, замість ціни пише '(замовлення оплачене)'.
@@ -875,15 +892,26 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
                 counted += 1
                 line = f"{flag} {disp}, {it.qty} шт — {line_total} грн  \n"
         lines.append(line)
+
+    # Умовне форматування адреси
+    if order.np and order.np.strip():
+        # Стандартна доставка на відділення
+        address_line = f"{format_city(order.city)} № {format_np(order.np)}"
+    else:
+        # Кур'єрська/адресна доставка
+        raw_address = order.city.strip()
+        address_line = f"📫: {raw_address}"
+        
     header = (
         f"{format_full_name(order.full_name)} \n"
         f"{format_phone(order.phone)}\n"
-        f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
+        f"{address_line}  \n\n"
     )
     footer = ""
     if not paid and counted >= 2:
         footer = f"\nЗагальна сумма: {grand_total} грн\n"
     return header + "".join(lines) + footer
+# --- КІНЕЦЬ ЗМІН ---
 
 # ==== OpenAI (основні функції) ====
 async def _openai_chat(messages: List[Dict[str, str]]) -> str:
@@ -1014,7 +1042,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
         # Логіка створення нового замовлення з тексту (якщо це не реплай)
-        # --- ПОЧАТОК ЗМІН ---
         note_text = None
         text_for_gpt = raw_user_message
 
@@ -1039,7 +1066,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await context.bot.send_message(chat_id=msg.chat.id, text=formatted)
             return
-        # --- КІНЕЦЬ ЗМІН ---
         else:
             logger.info("GPT-парсер не зміг структурувати повідомлення менеджера (або це не команда на створення замовлення).")
             return
