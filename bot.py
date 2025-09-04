@@ -280,28 +280,7 @@ def format_phone(phone: str) -> str:
     return (phone or "").strip()
 
 def format_city(city: str) -> str:
-    s = (city or "").strip()
-    
-    # Try to find and extract the region part (e.g., "Полтавська обл.")
-    # This regex looks for a word (Ukrainian letters, hyphen, apostrophe) followed by "область" or "обл."
-    match = re.search(r"((?:[А-ЯІЇЄҐа-яіїєґ'-]+)\s+(?:область|обл\.?))", s, re.IGNORECASE)
-    
-    if match:
-        region_part = match.group(1).strip()
-        # The rest of the string is considered the city
-        city_part = s.replace(region_part, "").strip(' ,')
-        
-        # Format city part
-        formatted_city = _smart_title(city_part)
-        
-        # Format region part for consistent casing (e.g., "Полтавська обл.")
-        region_words = region_part.split()
-        if len(region_words) >= 2:
-            formatted_region = f"{_smart_title(region_words[0])} {region_words[1].lower()}"
-            return f"{formatted_city} ({formatted_region})"
-
-    # If no region is found or something is wrong, just format the whole string as before
-    return _smart_title(s)
+    return _smart_title(city)
 
 def format_np(np_str: str) -> str:
     s = (np_str or "").strip()
@@ -642,6 +621,7 @@ def build_system_prompt() -> str:
         '  "phone": "0XX-XXXX-XXX",\n'
         '  "city": "Місто",\n'
         "Для поля `city` форматуй статус населеного пункту (і внось його в замовлення з маленької букви) якщо він вказаний клієнтом: 'пгт' або 'смт' перетворюй на 'смт.', 'село' — на 'с.', 'місто' — на 'м.'. Приклад: 'село Тарасівка' -> 'с. Тарасівка', 'пгт Калинівка' -> 'смт. Калинівка', 'місто Київ' -> 'м. Київ'. Якщо статус не вказано, залишай лише назву населеного пункту і все.\n"
+        "Якщо вказана область, додай її в дужках. Приклад: 'Буча, Київська область' -> 'Буча (Київська обл.)'.\n"
         '  "np": "Номер відділення або поштомат",\n'
         '  "items": [ {"country":"КРАЇНА","qty":N,"operator":"O2|Lebara|Vodafone"}, ... ]\n'
         "}\n\n"
