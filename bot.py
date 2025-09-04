@@ -281,27 +281,34 @@ def format_phone(phone: str) -> str:
 
 def format_city(city: str) -> str:
     s = (city or "").strip()
-    
-    # Try to find and extract the region part (e.g., "Полтавська обл.")
-    # This regex looks for a word (Ukrainian letters, hyphen, apostrophe) followed by "область" or "обл."
-    match = re.search(r"((?:[А-ЯІЇЄҐа-яіїєґ'-]+)\s+(?:область|обл\.?))", s, re.IGNORECASE)
-    
-    if match:
-        region_part = match.group(1).strip()
-        # The rest of the string is considered the city
-        city_part = s.replace(region_part, "").strip(' ,')
-        
-        # Format city part
-        formatted_city = _smart_title(city_part)
-        
-        # Format region part for consistent casing (e.g., "Полтавська обл.")
-        region_words = region_part.split()
-        if len(region_words) >= 2:
-            formatted_region = f"{_smart_title(region_words[0])} {region_words[1].lower()}"
-            return f"{formatted_city} ({formatted_region})"
+    if not s:
+        return ""
 
-    # If no region is found or something is wrong, just format the whole string as before
-    return _smart_title(s)
+    parts = s.split(maxsplit=1)
+    first_word = parts[0]
+    first_word_lower = first_word.lower().rstrip('.')
+
+    prefix_map = {
+        "пгт": "смт.",
+        "смт": "смт.",
+        "село": "с.",
+        "с": "с.",
+        "місто": "м.",
+        "м": "м."
+    }
+
+    if first_word_lower in prefix_map:
+        prefix = prefix_map[first_word_lower]
+        # Якщо є ще текст після префікса (назва населеного пункту)
+        if len(parts) > 1:
+            city_name = parts[1]
+            return f"{prefix} {_smart_title(city_name)}"
+        else:
+            # Якщо передали тільки сам префікс
+            return prefix
+    else:
+        # Якщо перший елемент не є відомим префіксом, форматуємо весь рядок
+        return _smart_title(s)
 
 def format_np(np_str: str) -> str:
     s = (np_str or "").strip()
@@ -641,7 +648,10 @@ def build_system_prompt() -> str:
         '  "full_name": "Імʼя Прізвище",\n'
         '  "phone": "0XX-XXXX-XXX",\n'
         '  "city": "Місто",\n'
-        "Для поля `city` форматуй статус населеного пункту (і внось його в замовлення з маленької букви) якщо він вказаний клієнтом: 'пгт' або 'смт' перетворюй на 'смт.', 'село' — на 'с.', 'місто' — на 'м.'. Приклад: 'село Тарасівка' -> 'с. Тарасівка', 'пгт Калинівка' -> 'смт. Калинівка', 'місто Київ' -> 'м. Київ'. Якщо статус не вказано, залишай лише назву населеного пункту і все.\n"
+        "Для поля `city` виконуй два правила форматування:\n"
+        "1. Стандартизуй статус: 'село' -> 'с.', 'пгт'/'смт' -> 'смт.', 'місто' -> 'м.'.\n"
+        "2. Якщо вказана область, додай її в дужках. Приклад: 'Гребінка Полтавська область' -> 'смт. Гребінка (Полтавська обл.)'.\n"
+        "Якщо статус чи область не вказано, не додавай нічого зайвого. Приклад: 'Бровари' -> 'Бровари'.\n"
         '  "np": "Номер відділення або поштомат",\n'
         '  "items": [ {"country":"КРАЇНА","qty":N,"operator":"O2|Lebara|Vodafone"}, ... ]\n'
         "}\n\n"
@@ -805,14 +815,15 @@ def build_manager_parser_prompt() -> str:
         "2. Для країн використовуй СУВОРО канонічні назви з цього списку: " + country_keys + ".\n"
         "3. Якщо для країни ВЕЛИКОБРИТАНІЯ (Англія) вказаний оператор (напр. O2, Lebara, Vodafone, Three), додай в об'єкт товару поле `\"operator\"`. Використовуй канонічне значення: `\"O2\"`, `\"Lebara\"`, `\"Vodafone\"`, `\"Three\"`. Якщо оператор не вказаний, не додавай це поле.\n"
         "4. Поля `full_name`, `phone`, `city`, `np` мають бути рядками. Поле `items` — масивом об'єктів.\n"
-        "5. Якщо якісь дані відсутні в тексті, залиш відповідне поле як порожній рядок \"\" або порожній масив [].\n\n"
+        "5. Якщо якісь дані відсутні в тексті, залиш відповідне поле як порожній рядок \"\" або порожній масив [].\n"
+        "6. Для поля `city` виконуй два правила форматування: 1. Стандартизуй статус: 'село' -> 'с.', 'пгт'/'смт' -> 'смт.', 'місто' -> 'м.'. 2. Якщо вказана область, додай її в дужках. Приклад: 'село Тарасівка, Київська область' -> 'с. Тарасівка (Київська обл.)'.\n\n"
         "Приклад:\n"
         "Вхідний текст: 'Так, це новий клієнт, Іван Франко, тел 0991234567. Хоче 2 сімки для Англії оператора водафон та 1 для США. Відправка в Київ, відділення 30. Каже, що оплатить на карту.'\n"
         "Твоя відповідь (лише цей JSON):\n"
         "{\n"
         '  "full_name": "Іван Франко",\n'
         '  "phone": "0991234567",\n'
-        '  "city": "Київ",\n'
+        '  "city": "м. Київ",\n'
         '  "np": "30",\n'
         '  "items": [\n'
         '    {"country": "ВЕЛИКОБРИТАНІЯ", "qty": 2, "operator": "Vodafone"},\n'
