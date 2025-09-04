@@ -280,7 +280,35 @@ def format_phone(phone: str) -> str:
     return (phone or "").strip()
 
 def format_city(city: str) -> str:
-    return _smart_title(city)
+    s = (city or "").strip()
+    if not s:
+        return ""
+
+    parts = s.split(maxsplit=1)
+    first_word = parts[0]
+    first_word_lower = first_word.lower().rstrip('.')
+
+    prefix_map = {
+        "пгт": "смт.",
+        "смт": "смт.",
+        "село": "с.",
+        "с": "с.",
+        "місто": "м.",
+        "м": "м."
+    }
+
+    if first_word_lower in prefix_map:
+        prefix = prefix_map[first_word_lower]
+        # Якщо є ще текст після префікса (назва населеного пункту)
+        if len(parts) > 1:
+            city_name = parts[1]
+            return f"{prefix} {_smart_title(city_name)}"
+        else:
+            # Якщо передали тільки сам префікс
+            return prefix
+    else:
+        # Якщо перший елемент не є відомим префіксом, форматуємо весь рядок
+        return _smart_title(s)
 
 def format_np(np_str: str) -> str:
     s = (np_str or "").strip()
