@@ -281,13 +281,35 @@ def format_phone(phone: str) -> str:
 
 def format_city(city: str) -> str:
     s = (city or "").strip()
+    
+    # 1. Спершу шукаємо та форматуємо ОБЛАСТЬ
+    region_str = ""
+    # Регулярний вираз для пошуку "Назва область" або "Назва обл."
+    match = re.search(r"((?:[А-ЯІЇЄҐа-яіїєґ'-]+)\s+(?:область|обл\.?))", s, re.IGNORECASE)
+    
+    if match:
+        region_part = match.group(1).strip()
+        # Видаляємо знайдену область з основного рядка, щоб обробити решту
+        s = s.replace(region_part, "").strip(' ,')
+        
+        region_words = region_part.split()
+        if len(region_words) >= 2:
+            # Правильне форматування: "Миколаївська обл."
+            region_name = _smart_title(region_words[0])
+            region_suffix = region_words[1].lower()
+            # Додаємо крапку, якщо її немає
+            if not region_suffix.endswith('.'):
+                region_suffix += '.'
+            region_str = f" ({region_name} {region_suffix})"
+
+    # 2. Тепер працюємо з рештою рядка (місто + префікс)
     if not s:
-        return ""
+        return "" # Повертаємо пустий рядок, якщо нічого не залишилось
 
     parts = s.split(maxsplit=1)
     first_word = parts[0]
     first_word_lower = first_word.lower().rstrip('.')
-
+    
     prefix_map = {
         "пгт": "смт.",
         "смт": "смт.",
@@ -297,18 +319,16 @@ def format_city(city: str) -> str:
         "м": "м."
     }
 
+    city_part = ""
     if first_word_lower in prefix_map:
         prefix = prefix_map[first_word_lower]
-        # Якщо є ще текст після префікса (назва населеного пункту)
-        if len(parts) > 1:
-            city_name = parts[1]
-            return f"{prefix} {_smart_title(city_name)}"
-        else:
-            # Якщо передали тільки сам префікс
-            return prefix
+        city_name = parts[1] if len(parts) > 1 else ""
+        city_part = f"{prefix} {_smart_title(city_name)}"
     else:
-        # Якщо перший елемент не є відомим префіксом, форматуємо весь рядок
-        return _smart_title(s)
+        city_part = _smart_title(s)
+    
+    # 3. З'єднуємо відформатоване місто та відформатовану область
+    return city_part.strip() + region_str
 
 def format_np(np_str: str) -> str:
     s = (np_str or "").strip()
