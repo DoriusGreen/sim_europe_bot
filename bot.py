@@ -346,7 +346,7 @@ def render_order(order: OrderData) -> str:
         f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
     )
     body = "".join(lines) + "\n"
-    footer = f"Загальна сумма: {grand_total} грн\n" if counted_countries >= 2 else ""
+    footer = f"Загальна сума: {grand_total} грн\n" if counted_countries >= 2 else ""
     return header + body + footer
 
 # ==== JSON парсери ====
@@ -882,7 +882,7 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
     )
     footer = ""
     if not paid and counted >= 2:
-        footer = f"\nЗагальна сумма: {grand_total} грн\n"
+        footer = f"\nЗагальна сума: {grand_total} грн\n"
     return header + "".join(lines) + footer
 
 # ==== OpenAI (основні функції) ====
@@ -950,7 +950,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== Обробка повідомлень =====
 PRICE_LINE_RE = re.compile(r"— (\d+ грн|договірна)")
-TOTAL_LINE_RE = re.compile(r"^Загальна сумма: \d+ грн")
+TOTAL_LINE_RE = re.compile(r"^Загальна сума: \d+ грн")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
