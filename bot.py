@@ -280,7 +280,28 @@ def format_phone(phone: str) -> str:
     return (phone or "").strip()
 
 def format_city(city: str) -> str:
-    return _smart_title(city)
+    s = (city or "").strip()
+    
+    # Try to find and extract the region part (e.g., "Полтавська обл.")
+    # This regex looks for a word (Ukrainian letters, hyphen, apostrophe) followed by "область" or "обл."
+    match = re.search(r"((?:[А-ЯІЇЄҐа-яіїєґ'-]+)\s+(?:область|обл\.?))", s, re.IGNORECASE)
+    
+    if match:
+        region_part = match.group(1).strip()
+        # The rest of the string is considered the city
+        city_part = s.replace(region_part, "").strip(' ,')
+        
+        # Format city part
+        formatted_city = _smart_title(city_part)
+        
+        # Format region part for consistent casing (e.g., "Полтавська обл.")
+        region_words = region_part.split()
+        if len(region_words) >= 2:
+            formatted_region = f"{_smart_title(region_words[0])} {region_words[1].lower()}"
+            return f"{formatted_city} ({formatted_region})"
+
+    # If no region is found or something is wrong, just format the whole string as before
+    return _smart_title(s)
 
 def format_np(np_str: str) -> str:
     s = (np_str or "").strip()
@@ -290,7 +311,7 @@ def format_np(np_str: str) -> str:
     s = re.sub(r"[^\d]", "", s)
     return s or (np_str or "").strip()
 
-ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн  \n"
+ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн   \n"
 
 @dataclass
 class OrderItem:
