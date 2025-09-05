@@ -307,13 +307,14 @@ class OrderData:
     city: str
     np: str
     items: List[OrderItem]
+    address: Optional[str] = None
 
 def _order_signature(order: OrderData) -> str:
     items_sig = ";".join(
         f"{normalize_country(it.country)}:{int(it.qty)}:{canonical_operator(it.operator) or ''}"
         for it in order.items
     )
-    return f"{format_full_name(order.full_name)}|{format_phone(order.phone)}|{format_city(order.city)}|{format_np(order.np)}|{items_sig}"
+    return f"{format_full_name(order.full_name)}|{format_phone(order.phone)}|{format_city(order.city)}|{format_np(order.np)}|{order.address or ''}|{items_sig}"
 
 def render_order(order: OrderData) -> str:
     lines = []
@@ -342,12 +343,17 @@ def render_order(order: OrderData) -> str:
             flag=flag, disp=disp, qty=it.qty, line_total=line_total_str
         ))
 
+    np_display = "0" if order.address else format_np(order.np)
     header = (
         f"{format_full_name(order.full_name)} \n"
         f"{format_phone(order.phone)}\n"
-        f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
+        f"{format_city(order.city)} № {np_display}  \n"
     )
-    body = "".join(lines) + "\n"
+    if order.address:
+        header += f"⚠️ Адресна доставка: {order.address}\n"
+    header += "\n"
+
+    body = "".join(lines)
     footer = f"Загальна сума: {grand_total} грн\n" if counted_countries >= 2 else ""
     return header + body + footer
 
@@ -380,7 +386,8 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
             phone=data.get("phone", "").strip(),
             city=data.get("city", "").strip(),
             np=str(data.get("np", "")).strip(),
-            items=items
+            items=items,
+            address=(data.get("address") or "").strip() or None
         )
     except Exception as e:
         logger.warning(f"Не вдалося розпарсити JSON замовлення: {e}")
@@ -602,7 +609,7 @@ def build_system_prompt() -> str:
         "ПОВНЕ замовлення складається з 4 пунктів:\n"
         "1. Ім'я та прізвище (Не плутай ім'я клієнта з по-батькові! Записуй лише імя та прізвище.).\n"
         "2. Номер телефону.\n"
-        "3. Місто та № відділення «Нової Пошти».\n"
+        "3. Місто та № відділення «Нової Пошти» АБО повна адреса для кур'єрської доставки.\n"
         "4. Країна(и) та кількість sim-карт.\n\n"
 
         # === ЯК ПИТАТИ ПРО НЕСТАЧУ ДАНИХ ===
@@ -635,8 +642,10 @@ def build_system_prompt() -> str:
         "- Вхід: 'Біла Церква Київська' -> Вихід: 'м. Біла Церква (Київська обл.)'\n"
         "Якщо статус не вказано то нічого не додавай.\n"
         '  "np": "Номер відділення або поштомат",\n'
+        '  "address": "вул. Шевченка, 25, кв 3",\n'
         '  "items": [ {"country":"КРАЇНА","qty":N,"operator":"O2|Lebara|Vodafone"}, ... ]\n'
-        "}\n\n"
+        "}\n"
+        "Якщо клієнт просить адресну/кур'єрську доставку, поле `np` повинно бути `\"0\"`, а в поле `address` записуй повну адресу (вулиця, будинок, квартира), яку вказав клієнт. В полі `address` нічого не змінюй, передавай як є. Якщо це доставка на відділення, поле `address` має бути відсутнім або `null`.\n\n"
 
         # === ПРАЙС/НАЯВНІСТЬ ===
         "Якщо користувач запитує ПРО ЦІНИ або про наявність — ВІДПОВІДАЙ ЛИШЕ JSON:\n"
@@ -791,22 +800,25 @@ def build_manager_parser_prompt() -> str:
         "- Місто та номер відділення або поштомату «Нової Пошти».\n"
         "- Перелік замовлених SIM-карт (країна та кількість).\n"
         "- Назву оператора (напр. Three, Lebara, O2, Vodafone), зазвичай для Великобританії. Можуть вказуватись кирилицею, чи скорочено.\n"
+        "- Інформацію про адресну доставку (напр. 'кур'єром на...', 'адресна доставка...').\n"
         "- Сторонні коментарі, які потрібно ігнорувати.\n\n"
         "Правила:\n"
         "1. Твоя відповідь має бути ТІЛЬКИ JSON-об'єктом. Без жодних пояснень, тексту до чи після, чи markdown-форматування.\n"
         "2. Для країн використовуй СУВОРО канонічні назви з цього списку: " + country_keys + ".\n"
         "3. Якщо для країни ВЕЛИКОБРИТАНІЯ (Англія) вказаний оператор (напр. O2, Lebara, Vodafone, Three), додай в об'єкт товару поле `\"operator\"`. Використовуй канонічне значення: `\"O2\"`, `\"Lebara\"`, `\"Vodafone\"`, `\"Three\"`. Якщо оператор не вказаний, не додавай це поле.\n"
-        "4. Поля `full_name`, `phone`, `city`, `np` мають бути рядками. Поле `items` — масивом об'єктів.\n"
-        "5. Якщо якісь дані відсутні в тексті, залиш відповідне поле як порожній рядок \"\" або порожній масив [].\n"
-        "6. Для поля `city` виконуй два правила форматування: 1. Стандартизуй статус: 'село' -> 'с.', 'пгт'/'смт' -> 'смт.', 'місто' -> 'м.'. 2. Якщо вказана область, додай її в дужках. Приклад: 'село Тарасівка, Київська область' -> 'с. Тарасівка (Київська обл.)'.\n\n"
+        "4. Якщо вказана адресна доставка, встанови поле `np` в `\"0\"`, а повну адресу (вулиця, будинок і т.д.) запиши в нове поле `address`. Не форматуй адресу, а передавай її як є. Якщо доставки на адресу немає, поле `address` має бути відсутнім.\n"
+        "5. Поля `full_name`, `phone`, `city`, `np` мають бути рядками. Поле `items` — масивом об'єктів.\n"
+        "6. Якщо якісь дані відсутні в тексті, залиш відповідне поле як порожній рядок \"\" або порожній масив [].\n"
+        "7. Для поля `city` виконуй два правила форматування: 1. Стандартизуй статус: 'село' -> 'с.', 'пгт'/'смт' -> 'смт.', 'місто' -> 'м.'. 2. Якщо вказана область, додай її в дужках. Приклад: 'село Тарасівка, Київська область' -> 'с. Тарасівка (Київська обл.)'.\n\n"
         "Приклад:\n"
-        "Вхідний текст: 'Так, це новий клієнт, Іван Франко, тел 0991234567. Хоче 2 сімки для Англії оператора водафон та 1 для США. Відправка в Київ, відділення 30. Каже, що оплатить на карту.'\n"
+        "Вхідний текст: 'Так, це новий клієнт, Іван Франко, тел 0991234567. Хоче 2 сімки для Англії оператора водафон та 1 для США. Відправка кур'єром до Києва, на вул. Хрещатик 1, кв 5. Каже, що оплатить на карту.'\n"
         "Твоя відповідь (лише цей JSON):\n"
         "{\n"
         '  "full_name": "Іван Франко",\n'
         '  "phone": "0991234567",\n'
         '  "city": "м. Київ",\n'
-        '  "np": "30",\n'
+        '  "np": "0",\n'
+        '  "address": "вул. Хрещатик 1, кв 5",\n'
         '  "items": [\n'
         '    {"country": "ВЕЛИКОБРИТАНІЯ", "qty": 2, "operator": "Vodafone"},\n'
         '    {"country": "США", "qty": 1}\n'
@@ -855,7 +867,8 @@ def try_parse_manager_order_json(json_text: str) -> Optional[OrderData]:
             phone=data.get("phone", "").strip(),
             city=data.get("city", "").strip(),
             np=str(data.get("np", "")).strip(),
-            items=items
+            items=items,
+            address=(data.get("address") or "").strip() or None
         )
     except (json.JSONDecodeError, TypeError, KeyError, ValueError) as e:
         logger.warning(f"Не вдалося розпарсити JSON від GPT-парсера: {e}\nТекст: {json_text}")
@@ -890,15 +903,21 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
                 counted += 1
                 line = f"{flag} {disp}, {it.qty} шт — {line_total} грн  \n"
         lines.append(line)
+    
+    np_display = "0" if order.address else format_np(order.np)
     header = (
         f"{format_full_name(order.full_name)} \n"
         f"{format_phone(order.phone)}\n"
-        f"{format_city(order.city)} № {format_np(order.np)}  \n\n"
+        f"{format_city(order.city)} № {np_display}  \n"
     )
+    if order.address:
+        header += f"⚠️ Адресна доставка: {order.address}\n"
+    header += "\n"
+
     footer = ""
     if not paid and counted >= 2:
         footer = f"\nЗагальна сума: {grand_total} грн\n"
-    return header + "".join(lines) + footer
+    return header + "".join(lines).strip() + footer
 
 # ==== OpenAI (основні функції) ====
 async def _openai_chat(messages: List[Dict[str, str]]) -> str:
