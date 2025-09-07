@@ -922,7 +922,7 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
 
     footer = ""
     if not paid and counted >= 2:
-        footer = f"\nЗагальна сума: {grand_total} грн\n"
+        footer = f"\n\nЗагальна сума: {grand_total} грн\n"
     return header + "".join(lines).strip() + footer
 
 # ==== OpenAI (основні функції) ====
