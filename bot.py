@@ -354,7 +354,7 @@ def render_order(order: OrderData) -> str:
     header += "\n"
 
     body = "".join(lines)
-    footer = f"Загальна сума: {grand_total} грн\n" if counted_countries >= 2 else ""
+    footer = f"\nЗагальна сума: {grand_total} грн\n" if counted_countries >= 2 else ""
     return header + body + footer
 
 # ==== JSON парсери ====
