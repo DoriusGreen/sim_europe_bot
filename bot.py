@@ -1163,7 +1163,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data["awaiting_missing"] = {1, 2, 3}
         context.chat_data["point4_hint"] = {"items": p4_items, "ts": time.time()}
 
-    if context.chat_data.get("awaiting_missing") == {1, 2, 3} and context.chat_data.get("point4_hint"):
+    # ----- ПОЧАТОК ВИПРАВЛЕННЯ -----
+    # Раніше умова була занадто суворою: `if context.chat_data.get("awaiting_missing") == {1, 2, 3} and ...`
+    # Це призводило до "втрати" підказки після першої відповіді клієнта.
+    # Тепер перевіряємо лише наявність підказки. Вона буде видалена автоматично після успішного замовлення.
+    if context.chat_data.get("point4_hint"):
         h = context.chat_data["point4_hint"]
         if "qty" in h and "countries" in h:
             hc = ", ".join(h["countries"])
@@ -1177,6 +1181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"\n\n[НАГАДУВАННЯ ДЛЯ ПАРСИНГУ: пункт 4 вже відомий: {pairs_text}. "
                 f"Додай/склей із пунктами 1–3.]"
             )
+    # ----- КІНЕЦЬ ВИПРАВЛЕННЯ -----
 
     awaiting = context.chat_data.get("awaiting_missing")
     if awaiting == {4}:
