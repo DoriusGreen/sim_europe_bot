@@ -135,7 +135,7 @@ DIAL_CODES = {
     "ВЕЛИКОБРИТАНІЯ": "+44",
     "ІСПАНІЯ": "+34",
     "ФРАНЦІЯ": "+33",
-    "НІМЕЧЧИНА": "+49",
+    "НІМЕЧЧИНA": "+49",
     "НІДЕРЛАНДИ": "+31",
     "ІТАЛІЯ": "+39",
     "ЧЕХІЯ": "+420",
@@ -156,8 +156,8 @@ COUNTRY_AVAILABILITY = {
     "ІСПАНІЯ":         {"status": "+", "reason": ""},
     "ЧЕХІЯ":           {"status": "+", "reason": ""},
     "ПОЛЬЩА":          {"status": "+", "reason": ""}, # Приклад вимкнення: {"status": "-", "reason": ""}
-    "ЛИТВА":           {"status": "-", "reason": "На жаль, сім-карти Литви наразі недоступні. Проблема з активацією."},
-    "ЛАТВІЯ":          {"status": "-", "reason": "На жаль, сім-карти Латвії наразі недоступні. Проблема з активацією"},
+    "ЛИТВА":           {"status": "+", "reason": ""},
+    "ЛАТВІЯ":          {"status": "+", "reason": ""},
     "КАЗАХСТАН":       {"status": "+", "reason": ""},
     "МАРОККО":         {"status": "+", "reason": ""},
 }
@@ -911,6 +911,7 @@ def _prune_history(history: List[Dict[str, str]]) -> None:
 
 # ======== GPT-парсер для повідомлень менеджера ========
 PAID_HINT_RE = re.compile(r"\b(без\s*нал|безнал|оплачено|передоплат|оплата\s*на\s*карт[уі])\b", re.IGNORECASE)
+NOTE_REPLY_RE = re.compile(r'^\s*примітка[:\s]*(.+)', re.IGNORECASE | re.DOTALL)
 
 def build_manager_parser_prompt() -> str:
     country_keys = ", ".join(f'"{k}"' for k in PRICE_TIERS.keys())
@@ -1134,6 +1135,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if msg.reply_to_message:
             is_paid_reply = bool(PAID_HINT_RE.search(raw_user_message))
             operator_reply = canonical_operator(raw_user_message)
+            note_match = NOTE_REPLY_RE.search(raw_user_message) # --- ДОДАНО ---
+
             original_msg_id = msg.reply_to_message.message_id
             original_text = msg.reply_to_message.text or ""
             
@@ -1174,9 +1177,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.warning(f"Не вдалося видалити повідомлення при додаванні оператора: {e}")
                     await context.bot.send_message(chat_id=msg.chat.id, text=final_text)
                     return
+            
+            # --- ПОЧАТОК ЗМІН: СЦЕНАРІЙ 3 ---
+            # Сценарій 3: Менеджер відповів приміткою
+            elif note_match:
+                note_text = note_match.group(1).strip()
+                if note_text:
+                    # Додаємо примітку до оригінального тексту
+                    final_text = original_text.strip() + f"\n\n⚠️ Примітка: {note_text}"
+                    
+                    try:
+                        # Видаляємо оригінальне замовлення
+                        await context.bot.delete_message(chat_id=msg.chat.id, message_id=original_msg_id)
+                        # Видаляємо відповідь менеджера ("примітка: ...")
+                        await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+                    except Exception as e:
+                        logger.warning(f"Не вдалося видалити повідомлення при додаванні примітки: {e}")
+                    
+                    # Публікуємо нове повідомлення з приміткою
+                    await context.bot.send_message(chat_id=msg.chat.id, text=final_text)
+                    return
+            # --- КІНЕЦЬ ЗМІН ---
 
         # Логіка створення нового замовлення з тексту (якщо це не реплай)
-        # --- ПОЧАТОК ЗМІН ---
         note_text = None
         text_for_gpt = raw_user_message
 
@@ -1201,7 +1224,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await context.bot.send_message(chat_id=msg.chat.id, text=formatted)
             return
-        # --- КІНЕЦЬ ЗМІН ---
         else:
             logger.info("GPT-парсер не зміг структурувати повідомлення менеджера (або це не команда на створення замовлення).")
             return
