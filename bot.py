@@ -144,6 +144,63 @@ DIAL_CODES = {
     "ЛАТВІЯ": "+371",
 }
 
+# ===== НАЯВНІСТЬ КРАЇН (ПЕРЕМИКАЧ) =====
+# + : Є в наявності
+# - : Немає в наявності
+# reason : Пояснення (якщо є)
+COUNTRY_AVAILABILITY = {
+    "ВЕЛИКОБРИТАНІЯ": {"status": "+", "reason": ""},
+    "НІДЕРЛАНДИ":     {"status": "+", "reason": ""},
+    "НІМЕЧЧИНА":       {"status": "+", "reason": ""},
+    "ФРАНЦІЯ":         {"status": "+", "reason": ""}, # Приклад вимкнення: {"status": "-", "reason": "Очікуємо нову партію наступного тижня."}
+    "ІСПАНІЯ":         {"status": "+", "reason": ""},
+    "ЧЕХІЯ":           {"status": "+", "reason": ""},
+    "ПОЛЬЩА":          {"status": "+", "reason": ""}, # Приклад вимкнення: {"status": "-", "reason": ""}
+    "ЛИТВА":           {"status": "+", "reason": ""},
+    "ЛАТВІЯ":          {"status": "+", "reason": ""},
+    "КАЗАХСТАН":       {"status": "+", "reason": ""},
+    "МАРОККО":         {"status": "+", "reason": ""},
+}
+# ==========================================
+
+def get_availability(country_norm: str) -> Tuple[str, Optional[str]]:
+    """
+    Перевіряє наявність країни.
+    Повертає (status, reason)
+    status: "+" (є), "-" (немає)
+    """
+    config = COUNTRY_AVAILABILITY.get(country_norm)
+    # Якщо країна є в PRICE_TIERS, але її забули додати в AVAILABILITY,
+    # вважаємо її доступною за замовчуванням.
+    if not config:
+        return ("+", None) 
+    
+    status = config.get("status", "+")
+    reason = config.get("reason", "").strip()
+    
+    if status == "-":
+        return ("-", reason or None) # Поверне `None` якщо reason порожній
+    return ("+", None)
+
+def render_out_of_stock(unavailable_items: Dict[str, Optional[str]]) -> str:
+    """
+    Генерує повідомлення для країн, які Є в прайсі, але ПОЗНАЧЕНІ як "немає в наявності".
+    unavailable_items: Dict[CANON_COUNTRY, reason]
+    """
+    lines = []
+    for country_key, reason in unavailable_items.items():
+        disp_name = DISPLAY.get(country_key, country_key.title())
+        if reason:
+            lines.append(f"❌ {disp_name}: {reason}")
+        else:
+            lines.append(f"❌ {disp_name}: Наразі немає в наявності.")
+    
+    if len(lines) == 1:
+         return f"На жаль, {lines[0][2:]}" # Повертаємо без "❌ " та "На жаль,"
+    
+    return "На жаль, ці позиції наразі недоступні:\n" + "\n".join(lines)
+
+
 def normalize_country(name: str) -> str:
     n = (name or "").strip().upper()
     if n in ("АНГЛІЯ", "БРИТАНІЯ", "UK", "U.K.", "UNITED KINGDOM", "ВБ", "GREAT BRITAIN", "+44", "ЮК", "У.К."):
@@ -205,27 +262,48 @@ def _format_range(min_q: int, max_q: Optional[int]) -> str:
 
 def render_price_block(country_key: str) -> str:
     flag = FLAGS.get(country_key, "")
-    header = f"{flag} {country_key} {flag}\n\n"
+    header_name = DISPLAY.get(country_key, country_key.title()) # Використовуємо DISPLAY, а не ключ
+    header = f"{flag} {header_name} {flag}\n\n"
+
+    # (ДОДАНА ПЕРЕВІРКА)
+    status, reason = get_availability(country_key)
+    if status == "-":
+        reason_text = reason or "Наразі немає в наявності."
+        return header + f"❌ {reason_text}\n\n"
+    # (КІНЕЦЬ ПЕРЕВІРКИ)
+
     tiers = PRICE_TIERS.get(country_key, [])
     if not tiers:
         return header + "Немає даних.\n\n"
+    
     tiers_sorted = sorted(tiers, key=lambda x: x[0])
     lines = []
     inserted_gap = False
     for idx, (min_q, price) in enumerate(tiers_sorted):
         next_min = tiers_sorted[idx + 1][0] if idx + 1 < len(tiers_sorted) else None
         max_q = (next_min - 1) if next_min else None
+        
         if not inserted_gap and min_q >= 100 and idx > 0:
             lines.append("")
             inserted_gap = True
+            
         qty_part = _format_range(min_q, max_q)
         line = f"{qty_part} — {'договірна' if price is None else str(price) + ' грн'}"
         lines.append(line)
+        
     return header + "\n".join(lines) + "\n\n"
 
 def available_list_text() -> str:
-    names = [DISPLAY[k] for k in PRICE_TIERS.keys()]
-    if len(names) == 1: return names[0]
+    names = []
+    for k in PRICE_TIERS.keys():
+        status, _ = get_availability(k)
+        if status == "+":
+            names.append(DISPLAY[k])
+            
+    if not names:
+        return "наразі нічого немає"
+    if len(names) == 1: 
+        return names[0]
     return ", ".join(names[:-1]) + " та " + names[-1]
 
 def render_prices(countries: List[str]) -> str:
@@ -286,7 +364,7 @@ def format_np(np_str: str) -> str:
     s = re.sub(r"[^\d]", "", s)
     return s or (np_str or "").strip()
 
-ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн   \n"
+ORDER_LINE = "{flag} {disp}, {qty} шт — {line_total} грн    \n"
 
 @dataclass
 class OrderItem:
@@ -564,14 +642,49 @@ def detect_point4_items(text: str) -> List[Tuple[str, int]]:
 
 # ==== СИСТЕМНІ ПРОМПТИ ====
 def build_system_prompt() -> str:
+    
+    # --- Формуємо динамічний блок про наявність ---
+    available_items_prompt = []
+    unavailable_items_prompt = []
+    
+    # Використовуємо PRICE_TIERS як єдине джерело істинності про список країн
+    for country_key in sorted(PRICE_TIERS.keys()): # Сортуємо для стабільності
+        status, reason = get_availability(country_key)
+        disp_name = DISPLAY.get(country_key, country_key.title())
+        if status == "+":
+            available_items_prompt.append(disp_name)
+        else:
+            reason_text = reason or "немає в наявності"
+            unavailable_items_prompt.append(f"{disp_name} (СТАТУС: {reason_text})")
+
+    availability_prompt_block = "\n\n=== АКТУАЛЬНА НАЯВНІСТЬ ===\n" \
+                                "Це ПОВНИЙ список товарів. Завжди перевіряй його перед тим, як приймати замовлення.\n"
+    
+    if available_items_prompt:
+        availability_prompt_block += f"✅ **Зараз в наявності:** {', '.join(available_items_prompt)}.\n"
+    else:
+        availability_prompt_block += "✅ **Зараз в наявності:** На жаль, наразі нічого немає.\n"
+        
+    if unavailable_items_prompt:
+        availability_prompt_block += f"❌ **Немає в наявності:** {', '.join(unavailable_items_prompt)}.\n" \
+                                     "Якщо клієнт питає про ці країни, не показуй прайс, а кажи, що їх немає, вказуючи причину.\n" \
+                                     "НЕ ПРИЙМАЙ замовлення на ці позиції.\n"
+    
+    availability_prompt_block += "\n"
+    # --- Кінець блоку про наявність ---
+
     return (
         # === РОЛЬ ТА КОНТЕКСТ ===
         "Ти — дружелюбний і корисний Telegram-бот в інтернет-магазині SIM-карт. "
         "Чітко та суворо дотримуйся прописаних інструкцій, якщо щось не зрозуміло, то не вигадуй, а краще перепитай клієнта що він мав на увазі.\n"
+        
+        # (ВСТАВЛЯЄМО ДИНАМІЧНИЙ БЛОК ТУТ)
+        + availability_prompt_block +
+
         "На початку чату клієнт уже отримує від акаунта власника перелік країн у наявності, цін на сім-карти цих країн та інформацію для доставки — ти це НЕ ДУБЛЮЄШ. "
         "Уважно все перевіряєш, якщо клієнт запитав про ціни, а ти бачиш, що перелік цін був в одному з останніх трьох повідомлень, то просто вказуєш, що перелік цін вище. "
         "Якщо перелік десь далеко, то надаєш клієнту перелік цін.\n"
-        "Якщо клієнт питає про якусь конкретну країну, чи по якісь конкретні декілька країн, то ЗАВЖДИ надавай йому ціни на ці країни.\n"
+        "Якщо клієнт питає про якусь конкретну країну, чи по якісь конкретні декілька країн, то ЗАВЖДИ надавай йому ціни на ці країни (якщо вони є в наявності).\n"
         "Завжди аналізуй кожне повідомлення на наявність елементів замовлення (пункти 1-4 нижче). "
         "Якщо в повідомленні або історії є хоча б один пункт, починай процес збору даних: показуй, що бракує (але не спам в кожному повідомленні відсутніми даними, показуй лише тоді коли це доречно), або формуй JSON, якщо все є.\n"
         "Не чекай явного 'хочу оформити' — починай збір одразу при виявленні даних.\n\n"
@@ -584,7 +697,7 @@ def build_system_prompt() -> str:
         "1. Ім'я та прізвище (Не плутай ім'я клієнта з по-батькові! Записуй лише імя та прізвище.).\n"
         "2. Номер телефону.\n"
         "3. Місто та № відділення «Нової Пошти».\n"
-        "4. Країна(и) та кількість sim-карт.\n\n"
+        "4. Країна(и) та кількість sim-карт (ТІЛЬКИ З ТИХ, ЩО В НАЯВНОСТІ).\n\n"
 
         # === ЯК ПИТАТИ ПРО НЕСТАЧУ ДАНИХ ===
         "Пункт 4 може бути у довільній формі/порядку («Англія 2 шт», «дві UK», «UK x2» тощо).\n"
@@ -674,7 +787,7 @@ def build_system_prompt() -> str:
          # === VIP-номери ===
         "Інколи клієнти можуть запитувати про «гарні», «красиві», «VIP» номери з гарними цифрами.\n"
         "Відповідай, що в нас є такі номери, але лише по країні Англія. "
-        "Коштують вони від 1500 грн до 2500 грн. Якщо цікаво, то менеджер надішле вам підбірку.\n" 
+        "Коштують вони від 1500 грн до 2500 грн. Якщо цікаво, то менеджер надішле вам підбірку.\n"
         "При цьому будь уважним, якщо клієнт просто запитує про номер, то зазвичай йому просто потрібен якийсь європейський номер, не VIP. "
         "В такому випадку преміум-номери йому не пропонуй, а дій як зазвичай.\n\n" 
 
@@ -1158,6 +1271,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         force_json = await _ask_gpt_force_point4(history, user_payload)
         forced = try_parse_order_json(force_json)
         if forced and forced.items and all([forced.full_name, forced.phone, forced.city, forced.np]):
+            
+            # --- ПОЧАТОК ЗМІН: ВАЛІДАЦІЯ НАЯВНОСТІ ---
+            out_of_stock_items = {} # Dict[KEY, reason]
+            valid_items = []
+            
+            for item in forced.items:
+                country_key = normalize_country(item.country).upper()
+                if country_key not in PRICE_TIERS:
+                    continue # Ігноруємо країну, якої нема в прайсі
+                    
+                status, reason = get_availability(country_key)
+                if status == "+":
+                    valid_items.append(item)
+                else:
+                    out_of_stock_items[country_key] = reason
+            
+            if out_of_stock_items:
+                stock_msg = render_out_of_stock(out_of_stock_items)
+                await msg.reply_text(stock_msg) # Напр., "На жаль, Польща: Наразі немає в наявності."
+                
+                if valid_items:
+                    # Якщо в кошику лишилось щось доступне (напр. Англія)
+                    await msg.reply_text("Чи відправити лише ті позиції, що є в наявності, або бажаєте зробити заміну?")
+                else:
+                    # Якщо кошик став повністю порожнім
+                    await msg.reply_text("Можливо, вас зацікавить якась інша країна з нашого асортименту?")
+                
+                # Скидаємо 'awaiting', щоб не зациклюватись
+                context.chat_data.pop("awaiting_missing", None)
+                context.chat_data.pop("point4_hint", None) # Також чистимо підказку
+                return 
+                
+            if not valid_items:
+                logger.warning("Замовлення (force_point4) було відфільтровано повністю.")
+                context.chat_data.pop("awaiting_missing", None)
+                context.chat_data.pop("point4_hint", None)
+                return
+            
+            forced.items = valid_items # Оновлюємо замовлення лише дійсними позиціями
+            # --- КІНЕЦЬ ЗМІН ---
+
             summary = render_order(forced)
             sig = _order_signature(forced)
             context.chat_data["last_order_sig"] = sig
@@ -1195,6 +1349,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     parsed = try_parse_order_json(reply_text)
     if parsed and parsed.items and all([parsed.full_name, parsed.phone, parsed.city, parsed.np]):
+        
+        # --- ПОЧАТОК ЗМІН: ВАЛІДАЦІЯ НАЯВНОСТІ ---
+        out_of_stock_items = {} # Dict[KEY, reason]
+        valid_items = []
+        
+        for item in parsed.items:
+            country_key = normalize_country(item.country).upper()
+            if country_key not in PRICE_TIERS:
+                continue # Ігноруємо країну, якої нема в прайсі
+                
+            status, reason = get_availability(country_key)
+            if status == "+":
+                valid_items.append(item)
+            else:
+                out_of_stock_items[country_key] = reason
+        
+        if out_of_stock_items:
+            # В замовленні є недоступні позиції. ВІДХИЛЯЄМО.
+            stock_msg = render_out_of_stock(out_of_stock_items)
+            await msg.reply_text(stock_msg) # Напр., "На жаль, Польща: Наразі немає в наявності."
+            
+            if valid_items:
+                # Якщо в кошику лишилось щось доступне (напр. Англія)
+                await msg.reply_text("Чи відправити лише ті позиції, що є в наявності, або бажаєте зробити заміну?")
+            else:
+                # Якщо кошик став повністю порожнім
+                await msg.reply_text("Можливо, вас зацікавить якась інша країна з нашого асортименту?")
+            
+            # Не додаємо в історію, не зберігаємо, виходимо
+            return 
+            
+        if not valid_items:
+            # Якщо після фільтрації замовлення стало порожнім
+            logger.warning("Замовлення від GPT було відфільтровано повністю. Нічого не відправлено.")
+            return
+            
+        # Якщо ми тут, оновлюємо `parsed.items` на випадок, якщо щось відфільтрувалось
+        parsed.items = valid_items 
+        # --- КІНЕЦЬ ЗМІН ---
+
         current_sig = _order_signature(parsed)
         last_sig = context.chat_data.get("last_order_sig")
         last_time = context.chat_data.get("last_order_time", 0)
@@ -1228,35 +1422,99 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price_countries = try_parse_price_json(reply_text)
     if price_countries is not None:
         want_all = any(str(c).upper() == "ALL" for c in price_countries)
-        normalized = [normalize_country(str(c)).upper() for c in price_countries if str(c).strip()]
-        valid = [k for k in normalized if k in PRICE_TIERS]
-        invalid = [price_countries[i] for i, k in enumerate(normalized)
-                   if k not in PRICE_TIERS and str(price_countries[i]).upper() != "ALL"]
+        
+        # --- ПОЧАТОК ЗМІН ---
+        
+        # 1. Розберемо всі запитані країни
+        normalized_keys = [] # Усі канонічні ключі, про які спитали
+        original_names = {} # Мапа KEY -> original_name
+        
+        if want_all:
+             # Якщо "ALL", беремо всі ключі з прайсу
+            normalized_keys = list(PRICE_TIERS.keys())
+            original_names = {k: k for k in normalized_keys}
+        else:
+            # Якщо спитали про конкретні
+            for c_name in price_countries:
+                if not str(c_name).strip(): continue
+                key = normalize_country(str(c_name)).upper()
+                normalized_keys.append(key)
+                original_names[key] = str(c_name)
+
+        # 2. Поділимо їх на 3 групи
+        valid_and_available = [] # Є в прайсі І є в наявності
+        out_of_stock = {}        # Є в прайсі, АЛЕ НЕМАЄ в наявності (Dict[KEY, reason])
+        invalid_countries = []   # НЕМАЄ в прайсі (список оригінальних назв)
+
+        for key in list(set(normalized_keys)): # Використовуємо set для унікальності
+            if key in PRICE_TIERS:
+                # Країна існує в прайсі, перевіряємо наявність
+                status, reason = get_availability(key)
+                if status == "+":
+                    valid_and_available.append(key)
+                else:
+                    out_of_stock[key] = reason
+            else:
+                # Країни взагалі не існує в прайсі
+                invalid_countries.append(original_names.get(key, key))
+        
+        # 3. Збережемо в кеш ТІЛЬКИ існуючі країни (для логіки "5 шт")
         if want_all:
             context.chat_data["last_price_countries"] = list(PRICE_TIERS.keys())
         else:
-            context.chat_data["last_price_countries"] = valid[:] if valid else []
-        if want_all:
-            price_msg = "".join(render_price_block(k) for k in PRICE_TIERS.keys())
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": price_msg})
-            _prune_history(history)
-            await msg.reply_text(price_msg)
-        elif valid:
-            price_msg = render_prices(valid)
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": price_msg})
-            _prune_history(history)
-            await msg.reply_text(price_msg)
-            if invalid:
-                await msg.reply_text(render_unavailable(invalid))
-        else:
-            unavailable_msg = render_unavailable(invalid if invalid else price_countries)
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": unavailable_msg})
-            _prune_history(history)
-            await msg.reply_text(unavailable_msg)
+            context.chat_data["last_price_countries"] = [k for k in normalized_keys if k in PRICE_TIERS]
+
+        # 4. Будуємо відповідь
         
+        # Спочатку відправляємо прайси на ті, що є
+        price_msg_content = ""
+        if want_all:
+            # Якщо "ALL", рендеримо всі доступні
+            price_blocks = []
+            for k in sorted(PRICE_TIERS.keys()): # Сортуємо
+                if get_availability(k)[0] == "+":
+                    price_blocks.append(render_price_block(k))
+            price_msg_content = "".join(price_blocks)
+            
+        elif valid_and_available:
+             # Якщо спитали конкретно, рендеримо лише їх
+             price_msg_content = render_prices(valid_and_available)
+        
+        # Відправляємо блок цін, якщо він не порожній
+        if price_msg_content:
+            history.append({"role": "user", "content": raw_user_message})
+            history.append({"role": "assistant", "content": price_msg_content})
+            _prune_history(history)
+            await msg.reply_text(price_msg_content)
+            
+        # Потім досилаємо повідомлення про ті, що "out of stock"
+        if out_of_stock:
+            stock_msg = render_out_of_stock(out_of_stock)
+            # Не додаємо в історію, це просто нотифікація
+            await msg.reply_text(stock_msg)
+
+        # Потім досилаємо повідомлення про ті, що "invalid"
+        if invalid_countries:
+            invalid_msg = render_unavailable(invalid_countries)
+            # Не додаємо в історію
+            await msg.reply_text(invalid_msg)
+            
+        # Якщо ВЗАГАЛІ нічого не знайдено (ні доступних, ні "out of stock", ні invalid)
+        # Або якщо всі країни були "недоступні" або "invalid"
+        if not valid_and_available and not out_of_stock and not invalid_countries:
+            # Це значить, що GPT повернув `ask_prices: true` але з порожнім списком `countries`
+            # Або всі країни були невідомі (invalid) - invalid_msg вже відправлено.
+            pass
+        elif not valid_and_available and not price_msg_content and not invalid_countries and want_all:
+            # Сценарій: просили "ALL", але всі країни "out_of_stock"
+            await msg.reply_text("На жаль, наразі всі SIM-карти відсутні.")
+        elif not valid_and_available and not price_msg_content and not invalid_countries and not want_all:
+             # Сценарій: просили "Франція", а вона "out_of_stock"
+             # stock_msg вже був відправлений
+             pass
+
+        # --- КІНЕЦЬ ЗМІН ---
+            
         follow = await _ask_gpt_followup(history, user_payload)
         ussd_targets_followup = try_parse_ussd_json(follow)
         if ussd_targets_followup:
