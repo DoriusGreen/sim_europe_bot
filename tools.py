@@ -171,8 +171,7 @@ def render_order(order: OrderData) -> str:
     for it in order.items:
         c_norm = normalize_country(it.country)
         disp = DISPLAY.get(c_norm, it.country.strip().title())
-        op = canonical_operator(it.operator)
-        if op and c_norm == "ВЕЛИКОБРИТАНІЯ": disp += f" (оператор {op})"
+        # Більше не додаємо (оператор ...), навіть якщо він є в даних
         
         flag = FLAGS.get(c_norm, "")
         price = unit_price(c_norm, it.qty)
@@ -196,8 +195,8 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
     for it in order.items:
         c_norm = normalize_country(it.country)
         disp = DISPLAY.get(c_norm, it.country.strip().title())
-        op = canonical_operator(it.operator)
-        if op and c_norm == "ВЕЛИКОБРИТАНІЯ": disp += f" (оператор {op})"
+        # Більше не додаємо (оператор ...)
+        
         flag = FLAGS.get(c_norm, "")
         if paid:
             lines.append(f"{flag} {disp}, {it.qty} шт — (замовлення оплачене)  \n")
