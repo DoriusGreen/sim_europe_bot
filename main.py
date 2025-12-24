@@ -33,6 +33,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg.from_user and msg.from_user.username and 
         msg.from_user.username.lower() == (config.DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()):
         
+        # === ВИПРАВЛЕННЯ: Ігноруємо розділювачі (..., ---, пробіли) ===
+        # Якщо повідомлення складається лише з крапок, тире або пробілів
+        if re.match(r'^[\.\-\s]+$', raw_user_message):
+            return 
+        # =============================================================
+
         if msg.reply_to_message:
             # Редагування існуючого замовлення через reply
             is_paid = bool(tools.PAID_HINT_RE.search(raw_user_message))
@@ -77,8 +83,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(msg.chat.id, formatted)
         return
 
-    # --- 2. Якщо пише Менеджер (ігноруємо або додаємо в історію) ---
-    if config.MANAGER_USER_IDS and msg.from_user and msg.from_user.id in config.MANAGER_USER_IDS: return
+    # --- 2. Якщо пише Менеджер (ігноруємо в усіх інших чатах) ---
+    # === ВИПРАВЛЕННЯ: Додано перевірку по Username ===
+    is_manager = False
+    if msg.from_user:
+        if config.MANAGER_USER_IDS and msg.from_user.id in config.MANAGER_USER_IDS:
+            is_manager = True
+        if config.MANAGER_USERNAMES and msg.from_user.username and msg.from_user.username.lower() in config.MANAGER_USERNAMES:
+            is_manager = True
+            
+    if is_manager:
+        # Якщо це менеджер, просто виходимо, не відповідаємо і не додаємо в історію
+        return
+    # =================================================
 
     # --- 3. Підготовка контексту для користувача ---
     user_payload = raw_user_message
@@ -140,12 +157,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "Залишилось вказати:" in reply_text and "📝" not in reply_text:
         reply_text = reply_text.replace("Залишилось вказати:", "📝 Залишилось вказати:")
     if reply_text.strip().startswith("🛒 Для оформлення") and context.chat_data.get("awaiting_missing") == {1, 2, 3}:
-        reply_text = (
-            "📝 Залишилось вказати:\n\n"
-            "1. Ім'я та прізвище.\n"
-            "2. Номер телефону.\n"
-            "3. Місто та № відділення \"Нової Пошти\".\n"
-        )
+        reply_text = "📝 Залишилось вказати:\n\n1. Ім'я та прізвище.\n2. Номер телефону.\n3. Місто та № відділення."
 
     # --- 6. Обробка відповідей GPT (JSON або текст) ---
     
