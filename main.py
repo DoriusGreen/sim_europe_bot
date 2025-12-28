@@ -33,9 +33,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg.from_user and msg.from_user.username and 
         msg.from_user.username.lower() == (config.DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()):
         
-        # === ВИПРАВЛЕННЯ: Ігноруємо розділювачі (..., ---, пробіли) ===
-        # Якщо повідомлення складається лише з крапок, тире або пробілів
-        if re.match(r'^[\.\-\s]+$', raw_user_message):
+        # === ВИПРАВЛЕННЯ: Ігноруємо розділювачі (..., ---, пробіли, …) ===
+        # Додано символ '…' (трикрапка одним символом), який ставлять телефони
+        if re.match(r'^[\.\-\s…]+$', raw_user_message):
             return 
         # =============================================================
 
@@ -84,7 +84,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- 2. Якщо пише Менеджер (ігноруємо в усіх інших чатах) ---
-    # === ВИПРАВЛЕННЯ: Додано перевірку по Username ===
     is_manager = False
     if msg.from_user:
         if config.MANAGER_USER_IDS and msg.from_user.id in config.MANAGER_USER_IDS:
@@ -95,7 +94,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_manager:
         # Якщо це менеджер, просто виходимо, не відповідаємо і не додаємо в історію
         return
-    # =================================================
 
     # --- 3. Підготовка контексту для користувача ---
     user_payload = raw_user_message
