@@ -84,7 +84,7 @@ COUNTRY_AVAILABILITY = {
     "НІДЕРЛАНДИ":     {"status": "+", "reason": ""},
     "НІМЕЧЧИНА":       {"status": "+", "reason": ""},
     "ФРАНЦІЯ":         {"status": "+", "reason": ""},
-    "ІСПАНІЯ":         {"status": "-", "reason": "Нараз сім-карти недоступні."},
+    "ІСПАНІЯ":         {"status": "+", "reason": ""},
     "ЧЕХІЯ":           {"status": "+", "reason": ""},
     "ПОЛЬЩА":          {"status": "+", "reason": ""},
     "ЛИТВА":           {"status": "-", "reason": "Нараз сім-карти недоступні через проблему з активацією."},
@@ -110,3 +110,15 @@ def get_availability(country_norm: str) -> Tuple[str, Optional[str]]:
     config = COUNTRY_AVAILABILITY.get(country_norm)
     if not config: return ("+", None)
     return (config.get("status", "+"), config.get("reason", "").strip() or None)
+
+# ==== КОДИ ДЛЯ АВТО-ВІДПОВІДІ ПІСЛЯ ЗАМОВЛЕННЯ ====
+POST_ORDER_USSD = {
+    "ВЕЛИКОБРИТАНІЯ": "*#100#",
+    "НІМЕЧЧИНА": "*135#",
+    "ФРАНЦІЯ": "*144*1#",
+    "НІДЕРЛАНДИ": "*102#",
+    "ІСПАНІЯ": "*321#",
+    "ЧЕХІЯ": "*101#", # Для T-Mobile
+    "КАЗАХСТАН": "*120#",
+    "МОЛДОВА": "*444#",
+}
