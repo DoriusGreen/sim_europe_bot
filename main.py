@@ -34,7 +34,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg.from_user.username.lower() == (config.DEFAULT_OWNER_USERNAME or "").strip().lstrip("@").lower()):
         
         # === ВИПРАВЛЕННЯ: Ігноруємо розділювачі (..., ---, пробіли, …) ===
-        # Додано символ '…' (трикрапка одним символом), який ставлять телефони
         if re.match(r'^[\.\-\s…]+$', raw_user_message):
             return 
         # =============================================================
@@ -92,7 +91,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_manager = True
             
     if is_manager:
-        # Якщо це менеджер, просто виходимо, не відповідаємо і не додаємо в історію
         return
 
     # --- 3. Підготовка контексту для користувача ---
@@ -144,6 +142,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history.append({"role": "assistant", "content": summary})
             await msg.reply_text(summary)
             await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
+            
+            # === АВТО-ПОВІДОМЛЕННЯ З КОДАМИ ===
+            post_order_text = tools.render_post_order_info(forced)
+            if post_order_text:
+                await msg.reply_text(post_order_text)
+            # ==================================
+
             try: await context.bot.send_message(config.ORDER_FORWARD_CHAT_ID, f"@{msg.from_user.username}\n{summary}" if msg.from_user.username else summary)
             except Exception as e: logger.warning(f"Forward error: {e}")
             return
@@ -194,6 +199,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "assistant", "content": summary})
         await msg.reply_text(summary)
         await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
+        
+        # === АВТО-ПОВІДОМЛЕННЯ З КОДАМИ ===
+        post_order_text = tools.render_post_order_info(parsed)
+        if post_order_text:
+            await msg.reply_text(post_order_text)
+        # ==================================
+
         try: await context.bot.send_message(config.ORDER_FORWARD_CHAT_ID, f"@{msg.from_user.username}\n{summary}" if msg.from_user.username else summary)
         except Exception as e: logger.warning(f"Forward error: {e}")
         return
