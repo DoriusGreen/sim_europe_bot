@@ -3,7 +3,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Set, Tuple
-from config import PRICE_TIERS, FLAGS, DISPLAY, DIAL_CODES, USSD_DATA, get_availability
+from config import PRICE_TIERS, FLAGS, DISPLAY, DIAL_CODES, USSD_DATA, POST_ORDER_USSD, get_availability
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +240,23 @@ def render_ussd_targets(targets: List[Dict[str, str]]) -> str:
         result_lines.append("")
     while result_lines and result_lines[-1] == "": result_lines.pop()
     return "\n".join(result_lines).strip()
+
+def render_post_order_info(order: OrderData) -> Optional[str]:
+    """Формує повідомлення з USSD-кодами для країн у замовленні"""
+    # Збираємо унікальні країни з замовлення
+    unique_countries = {normalize_country(item.country).upper() for item in order.items}
+    lines = []
+    
+    for c_key in unique_countries:
+        code = POST_ORDER_USSD.get(c_key)
+        if code:
+            flag = FLAGS.get(c_key, "")
+            lines.append(f"{flag} {code} — комбінація щоб дізнатись номер")
+    
+    if not lines:
+        return None
+        
+    return "\n".join(lines)
 
 def order_signature(order: OrderData) -> str:
     items_sig = ";".join(f"{normalize_country(it.country)}:{it.qty}:{canonical_operator(it.operator) or ''}" for it in order.items)
