@@ -147,10 +147,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             post_order_text = tools.render_post_order_info(forced)
             if post_order_text:
                 await msg.reply_text(post_order_text)
-            
-            # === РЕКЛАМА БЛАГОДІЙНОСТІ ===
-            await msg.reply_text(config.PROMO_TEXT, parse_mode="HTML", disable_web_page_preview=False)
-            # ==============================
+            # ==================================
 
             try: await context.bot.send_message(config.ORDER_FORWARD_CHAT_ID, f"@{msg.from_user.username}\n{summary}" if msg.from_user.username else summary)
             except Exception as e: logger.warning(f"Forward error: {e}")
@@ -207,10 +204,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         post_order_text = tools.render_post_order_info(parsed)
         if post_order_text:
             await msg.reply_text(post_order_text)
-        
-        # === РЕКЛАМА БЛАГОДІЙНОСТІ ===
-        await msg.reply_text(config.PROMO_TEXT, parse_mode="HTML", disable_web_page_preview=False)
-        # ==============================
+        # ==================================
 
         try: await context.bot.send_message(config.ORDER_FORWARD_CHAT_ID, f"@{msg.from_user.username}\n{summary}" if msg.from_user.username else summary)
         except Exception as e: logger.warning(f"Forward error: {e}")
