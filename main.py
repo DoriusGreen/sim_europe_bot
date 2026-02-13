@@ -140,6 +140,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             summary = tools.render_order(forced)
             context.chat_data["last_order_sig"] = tools.order_signature(forced)
             context.chat_data["last_order_time"] = time.time()
+            context.chat_data["order_completed_at"] = time.time()  # <-- мітка завершення
             context.chat_data.pop("awaiting_missing", None)
             context.chat_data.pop("point4_hint", None)
             
@@ -160,6 +161,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: await context.bot.send_message(config.ORDER_FORWARD_CHAT_ID, f"@{msg.from_user.username}\n{summary}" if msg.from_user.username else summary)
             except Exception as e: logger.warning(f"Forward error: {e}")
             return
+
+    # --- 4.5. Захист від дублювання замовлень ---
+    order_completed_at = context.chat_data.get("order_completed_at", 0)
+    order_is_recent = (time.time() - order_completed_at) <= config.ORDER_COOLDOWN_SEC
+
+    # Рівень 1: Ack-повідомлення після щойно оформленого замовлення → не кличемо GPT
+    if order_is_recent and tools.is_ack_message(raw_user_message):
+        logger.info(f"Ack after order intercepted: '{raw_user_message}'")
+        ack_reply = "Якщо у вас виникнуть додаткові питання — звертайтесь! 😊"
+        history.append({"role": "user", "content": raw_user_message})
+        history.append({"role": "assistant", "content": ack_reply})
+        await msg.reply_text(ack_reply)
+        return
+    
+    # Рівень 2: Не ack, але замовлення нещодавно оформлене → підказка для GPT
+    if order_is_recent:
+        user_payload += "\n\n[СИСТЕМНЕ НАГАДУВАННЯ: замовлення щойно оформлене. НЕ генеруй повторний JSON замовлення, якщо клієнт не просить ЯВНО зробити НОВЕ замовлення з новими даними.]"
 
     # --- 5. Основний запит до GPT ---
     reply_text = await ai.ask_gpt_main(history, user_payload)
@@ -192,14 +210,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not valid_items: return
         parsed.items = valid_items
 
-        # Перевірка дублікатів
+        # Перевірка дублікатів (Рівень 3)
         sig = tools.order_signature(parsed)
-        if sig == context.chat_data.get("last_order_sig") and (time.time() - context.chat_data.get("last_order_time", 0) <= config.ORDER_DUP_WINDOW_SEC):
-             context.chat_data.pop("awaiting_missing", None); return
+        last_sig = context.chat_data.get("last_order_sig")
+        last_time = context.chat_data.get("last_order_time", 0)
+        time_since_last = time.time() - last_time
+        if last_sig:
+            # Точне співпадіння сигнатури — блокуємо протягом 20 хв
+            if sig == last_sig and time_since_last <= config.ORDER_DUP_WINDOW_SEC:
+                logger.info("Duplicate order blocked (exact sig match)")
+                context.chat_data.pop("awaiting_missing", None)
+                return
+            # Нечітке (ті самі товари) — блокуємо лише протягом 3 хв,
+            # щоб не заблокувати те саме замовлення для іншої людини
+            if time_since_last <= config.ORDER_COOLDOWN_SEC:
+                if tools.items_signature(parsed) == tools.items_signature_from_sig(last_sig):
+                    logger.info("Duplicate order blocked (same items within cooldown)")
+                    context.chat_data.pop("awaiting_missing", None)
+                    return
 
         summary = tools.render_order(parsed)
         context.chat_data["last_order_sig"] = sig
         context.chat_data["last_order_time"] = time.time()
+        context.chat_data["order_completed_at"] = time.time()  # <-- мітка завершення
         context.chat_data.pop("awaiting_missing", None)
         context.chat_data.pop("point4_hint", None)
         
