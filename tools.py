@@ -3,7 +3,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Set, Tuple
-from config import PRICE_TIERS, FLAGS, DISPLAY, DIAL_CODES, USSD_DATA, POST_ORDER_USSD, get_availability
+from config import PRICE_TIERS, FLAGS, DISPLAY, DIAL_CODES, USSD_DATA, POST_ORDER_USSD, get_availability, CRYPTO_WALLET, CRYPTO_UAH_RATE, CRYPTO_FEE_USD
 
 logger = logging.getLogger(__name__)
 
@@ -321,9 +321,45 @@ def render_post_order_info(order: OrderData) -> Optional[str]:
         
     return "\n".join(lines)
 
+def calc_order_total(order: OrderData) -> int:
+    """Підраховує загальну суму замовлення в грн."""
+    total = 0
+    for it in order.items:
+        c_norm = normalize_country(it.country).upper()
+        price = unit_price(c_norm, it.qty)
+        if price is not None:
+            total += price * it.qty
+    return total
+
 def order_signature(order: OrderData) -> str:
     items_sig = ";".join(f"{normalize_country(it.country)}:{it.qty}:{canonical_operator(it.operator) or ''}" for it in order.items)
     return f"{format_full_name(order.full_name)}|{format_phone(order.phone)}|{format_city(order.city)}|{format_np(order.np)}|{order.address or ''}|{items_sig}"
+
+# ==== Крипто-оплата ====
+def try_parse_crypto_json(text: str) -> bool:
+    """Перевіряє, чи GPT повернув JSON з запитом крипто-оплати."""
+    json_str = _extract_json_block(text or "")
+    if not json_str: return False
+    try:
+        data = json.loads(json_str)
+        return data.get("crypto_payment") is True
+    except Exception: return False
+
+def calc_crypto_amount(total_uah: int) -> int:
+    """Розраховує суму в USDT: (сума_грн / курс) + комісія, округлення вгору."""
+    import math
+    return math.ceil(total_uah / CRYPTO_UAH_RATE) + CRYPTO_FEE_USD
+
+def render_crypto_payment(total_uah: int) -> str:
+    """Формує повідомлення з реквізитами для крипто-оплати."""
+    usdt_amount = calc_crypto_amount(total_uah)
+    return (
+        f"💰 Оплата USDT (TRC-20):\n\n"
+        f"Сума: {usdt_amount} USDT\n\n"
+        f"Адреса гаманця:\n"
+        f"`{CRYPTO_WALLET}`\n\n"
+        f"Після оплати надішліть, будь ласка, скріншот підтвердження."
+    )
 
 def items_signature(order: OrderData) -> str:
     """Сигнатура лише товарів (країна+кількість), без персональних даних."""
