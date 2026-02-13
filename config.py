@@ -10,6 +10,7 @@ PORT = int(os.getenv("PORT", "8443"))
 # ==== Константи пам'яті/міток ====
 MAX_TURNS = 10
 ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
+ORDER_COOLDOWN_SEC = 3 * 60     # 3 хвилини — вікно після замовлення, в якому ack-повідомлення не підуть до GPT
 
 # ==== ГРУПА ДЛЯ ЗАМОВЛЕНЬ ====
 ORDER_FORWARD_CHAT_ID = int(os.getenv("ORDER_FORWARD_CHAT_ID", "-1003062477534"))
