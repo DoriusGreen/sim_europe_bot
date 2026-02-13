@@ -23,10 +23,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg: return
     raw_user_message = msg.text.strip() if msg.text else ""
+    if not raw_user_message: return  # Ігноруємо порожні/нетекстові повідомлення
     
     # --- Ініціалізація історії ---
     if "history" not in context.chat_data: context.chat_data["history"] = []
     history = context.chat_data["history"]
+    # Обрізка історії при кожному вхідному повідомленні
+    max_entries = config.MAX_TURNS * 2
+    if len(history) > max_entries:
+        del history[:len(history) - max_entries]
 
     # --- 1. Обробка команд МЕНЕДЖЕРА в групі замовлень ---
     if (msg.chat and msg.chat.id == config.ORDER_FORWARD_CHAT_ID and 
@@ -282,7 +287,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if reply_text:
         history.append({"role": "user", "content": raw_user_message})
         history.append({"role": "assistant", "content": reply_text})
-        if len(history) > config.MAX_TURNS * 2: del history[: len(history) - config.MAX_TURNS * 2]
         await msg.reply_text(reply_text)
 
 # ===== Запуск =====
