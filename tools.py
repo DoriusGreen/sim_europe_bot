@@ -62,9 +62,19 @@ NOTE_REPLY_RE = re.compile(r'^\s*примітка[:\s]*(.+)', re.IGNORECASE | re
 PRICE_LINE_RE = re.compile(r"— (\d+ грн|договірна)")
 TOTAL_LINE_RE = re.compile(r"^Загальна сума: \d+ грн")
 ACK_PATTERNS = [
-    r"^\s*(ок(ей)?|добре|чудово|гарно|дякую!?|спасибі|спасибо|жду|чекаю|ок,?\s*жду|ок,?\s*чекаю|ого|ух\s*ты)\s*[\.\!]*\s*$",
-    r"^\s*[👍🙏✅👌]+\s*$",
+    r"^\s*(ок(ей)?|добре|чудово|гарно|дякую!?|спасибі|спасибо|жду|чекаю|ок,?\s*жду|ок,?\s*чекаю|ого|ух\s*ты|супер|зрозуміло|ясно|прийнято|клас|круто|ладно|хорошо|понятно|понял|зрозумів|got\s*it|ok|okay|thanks|thx)\s*[\.\!\,]*\s*$",
+    r"^\s*[👍🙏✅👌🔥💪👏😊🤝]+\s*$",
+    r"^\s*\+\s*$",
 ]
+
+_ACK_COMPILED = [re.compile(p, re.IGNORECASE) for p in ACK_PATTERNS]
+
+def is_ack_message(text: str) -> bool:
+    """Перевіряє, чи повідомлення є простим підтвердженням (ок, дякую, +, 👍 тощо)."""
+    t = (text or "").strip()
+    if not t or len(t) > 40:
+        return False
+    return any(r.match(t) for r in _ACK_COMPILED)
 
 FALLBACK_PLASTIC_MSG = "Номер вказаний на пластику сім-карти"
 
@@ -314,6 +324,28 @@ def render_post_order_info(order: OrderData) -> Optional[str]:
 def order_signature(order: OrderData) -> str:
     items_sig = ";".join(f"{normalize_country(it.country)}:{it.qty}:{canonical_operator(it.operator) or ''}" for it in order.items)
     return f"{format_full_name(order.full_name)}|{format_phone(order.phone)}|{format_city(order.city)}|{format_np(order.np)}|{order.address or ''}|{items_sig}"
+
+def items_signature(order: OrderData) -> str:
+    """Сигнатура лише товарів (країна+кількість), без персональних даних."""
+    parts = sorted(f"{normalize_country(it.country).upper()}:{it.qty}" for it in order.items)
+    return ";".join(parts)
+
+def items_signature_from_sig(full_sig: str) -> str:
+    """Витягує сигнатуру товарів з повної order_signature."""
+    # Формат: name|phone|city|np|address|item1;item2;...
+    parts = full_sig.rsplit("|", 1)
+    if len(parts) < 2:
+        return ""
+    items_part = parts[-1]  # "ВЕЛИКОБРИТАНІЯ:3:Vodafone;НІМЕЧЧИНА:2:"
+    # Нормалізуємо: прибираємо оператор, лишаємо країна:кількість
+    normalized = []
+    for item_str in items_part.split(";"):
+        if not item_str.strip():
+            continue
+        item_parts = item_str.split(":")
+        if len(item_parts) >= 2:
+            normalized.append(f"{item_parts[0]}:{item_parts[1]}")
+    return ";".join(sorted(normalized))
 
 # ==== Парсинг JSON в об'єкти ====
 def try_parse_order_json(text: str) -> Optional[OrderData]:
