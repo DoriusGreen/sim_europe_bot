@@ -141,6 +141,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data["last_order_sig"] = tools.order_signature(forced)
             context.chat_data["last_order_time"] = time.time()
             context.chat_data["order_completed_at"] = time.time()  # <-- мітка завершення
+            context.chat_data["last_order_total"] = tools.calc_order_total(forced)  # <-- сума для крипти
             context.chat_data.pop("awaiting_missing", None)
             context.chat_data.pop("point4_hint", None)
             
@@ -233,6 +234,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data["last_order_sig"] = sig
         context.chat_data["last_order_time"] = time.time()
         context.chat_data["order_completed_at"] = time.time()  # <-- мітка завершення
+        context.chat_data["last_order_total"] = tools.calc_order_total(parsed)  # <-- сума для крипти
         context.chat_data.pop("awaiting_missing", None)
         context.chat_data.pop("point4_hint", None)
         
@@ -254,7 +256,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e: logger.warning(f"Forward error: {e}")
         return
 
-    # Б) Запит цін
+    # Б) Крипто-оплата
+    if tools.try_parse_crypto_json(reply_text):
+        total_uah = context.chat_data.get("last_order_total", 0)
+        if total_uah > 0:
+            crypto_text = tools.render_crypto_payment(total_uah)
+            history.append({"role": "user", "content": raw_user_message})
+            history.append({"role": "assistant", "content": crypto_text})
+            await msg.reply_text(crypto_text, parse_mode="Markdown")
+        else:
+            fallback = "Спершу потрібно оформити замовлення, щоб я міг розрахувати суму для оплати криптою."
+            history.append({"role": "user", "content": raw_user_message})
+            history.append({"role": "assistant", "content": fallback})
+            await msg.reply_text(fallback)
+        return
+
+    # В) Запит цін
     price_countries = tools.try_parse_price_json(reply_text)
     if price_countries is not None:
         want_all = any(str(c).upper() == "ALL" for c in price_countries)
@@ -295,7 +312,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data.pop("awaiting_missing", None)
         return
 
-    # В) Запит USSD
+    # Г) Запит USSD
     ussd_targets = tools.try_parse_ussd_json(reply_text)
     if ussd_targets is not None:
         if ussd_targets:
@@ -311,7 +328,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(txt)
         return
 
-    # Г) Звичайний текст або уточнення пунктів
+    # Ґ) Звичайний текст або уточнення пунктів
     missing = tools.missing_points_from_reply(reply_text)
     if missing: context.chat_data["awaiting_missing"] = missing
     else: 
