@@ -74,7 +74,7 @@ DISPLAY = {
 
 DIAL_CODES = {
     "ВЕЛИКОБРИТАНІЯ": "+44", "ІСПАНІЯ": "+34", "ФРАНЦІЯ": "+33",
-    "НІМЕЧЧИНA": "+49", "НІДЕРЛАНДИ": "+31", "ІТАЛІЯ": "+39",
+    "НІМЕЧЧИНА": "+49", "НІДЕРЛАНДИ": "+31", "ІТАЛІЯ": "+39",
     "ЧЕХІЯ": "+420", "МОЛДОВА": "+373", "КАЗАХСТАН": "+7", "ЛАТВІЯ": "+371",
 }
 
@@ -107,9 +107,9 @@ USSD_DATA = {
 }
 
 def get_availability(country_norm: str) -> Tuple[str, Optional[str]]:
-    config = COUNTRY_AVAILABILITY.get(country_norm)
-    if not config: return ("+", None)
-    return (config.get("status", "+"), config.get("reason", "").strip() or None)
+    entry = COUNTRY_AVAILABILITY.get(country_norm)
+    if not entry: return ("+", None)
+    return (entry.get("status", "+"), entry.get("reason", "").strip() or None)
 
 # ==== КОДИ ДЛЯ АВТО-ВІДПОВІДІ ПІСЛЯ ЗАМОВЛЕННЯ ====
 POST_ORDER_USSD = {
