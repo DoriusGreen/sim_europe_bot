@@ -1,10 +1,10 @@
-import openai
+from openai import AsyncOpenAI
 import logging
 from typing import List, Dict
 from config import PRICE_TIERS, DISPLAY, get_availability, OPENAI_API_KEY
 
 logger = logging.getLogger(__name__)
-openai.api_key = OPENAI_API_KEY
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # ==== СИСТЕМНІ ПРОМПТИ ====
 def build_system_prompt() -> str:
@@ -292,8 +292,8 @@ async def _openai_chat(messages: List[Dict[str, str]], temp=0.2, json_mode=False
             "temperature": temp,
         }
         if json_mode: kwargs["response_format"] = {"type": "json_object"}
-        response = await openai.ChatCompletion.acreate(**kwargs)
-        return response.choices[0].message["content"]
+        response = await client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content or ""
     except Exception as e:
         logger.error(f"OpenAI Error: {e}")
         return ""
@@ -310,13 +310,13 @@ async def ask_gpt_followup(history: List[Dict[str, str]], user_payload: str) -> 
     messages.extend(tail)
     messages.append({"role": "user", "content": user_payload})
     try:
-        response = await openai.ChatCompletion.acreate(
+        response = await client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
             max_tokens=300,
             temperature=0.2,
         )
-        return response.choices[0].message["content"].strip()
+        return (response.choices[0].message.content or "").strip()
     except Exception as e:
         logger.error(f"Помилка follow-up до OpenAI: {e}")
         return ""
@@ -326,13 +326,13 @@ async def ask_gpt_force_point4(history: List[Dict[str, str]], user_payload: str)
     messages.extend(history)
     messages.append({"role": "user", "content": user_payload})
     try:
-        response = await openai.ChatCompletion.acreate(
+        response = await client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
             max_tokens=500,
             temperature=0.1,
         )
-        return response.choices[0].message["content"].strip()
+        return (response.choices[0].message.content or "").strip()
     except Exception as e:
         logger.error(f"Помилка force-point4 до OpenAI: {e}")
         return ""
@@ -343,14 +343,14 @@ async def ask_gpt_to_parse_manager_order(text: str) -> str:
         {"role": "user", "content": text}
     ]
     try:
-        response = await openai.ChatCompletion.acreate(
+        response = await client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
             max_tokens=500,
             temperature=0.1,
             response_format={"type": "json_object"}
         )
-        return response.choices[0].message["content"]
+        return response.choices[0].message.content or ""
     except Exception as e:
         logger.error(f"Помилка GPT-парсера для менеджера: {e}")
         return ""
