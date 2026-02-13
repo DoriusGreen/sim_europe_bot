@@ -24,9 +24,36 @@ class OrderData:
     address: Optional[str] = None
 
 # ==== Регулярні вирази ====
-ORDER_JSON_RE = re.compile(r"\{[\s\S]*\}")
-PRICE_JSON_RE = re.compile(r"\{[\s\S]*\}")
-USSD_JSON_RE = re.compile(r"\{[\s\S]*\}")
+def _extract_json_block(text: str) -> Optional[str]:
+    """Знаходить перший збалансований {...} блок у тексті."""
+    if not text:
+        return None
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+    return None
 QTY_ONLY_RE = re.compile(r"(?:\bпо\b\s*)?(\d{1,4})\s*(шт|штук|шт\.?|сим(?:-?карт[аи])?|sim-?card|sim|pieces?)\b", re.IGNORECASE)
 NUM_POS_RE = re.compile(r"\d{1,4}")
 PO_QTY_RE = re.compile(r"\bпо\s*(\d{1,4})\b", re.IGNORECASE)
@@ -38,6 +65,8 @@ ACK_PATTERNS = [
     r"^\s*(ок(ей)?|добре|чудово|гарно|дякую!?|спасибі|спасибо|жду|чекаю|ок,?\s*жду|ок,?\s*чекаю|ого|ух\s*ты)\s*[\.\!]*\s*$",
     r"^\s*[👍🙏✅👌]+\s*$",
 ]
+
+FALLBACK_PLASTIC_MSG = "Номер вказаний на пластику сім-карти"
 
 COUNTRY_KEYWORDS = {
     "ВЕЛИКОБРИТАНІЯ": ["англ", "британ", "великобритан", "uk", "u.k", "great britain", "+44"],
@@ -57,10 +86,35 @@ COUNTRY_KEYWORDS = {
 # ==== Допоміжні функції нормалізації ====
 def normalize_country(name: str) -> str:
     n = (name or "").strip().upper()
-    if n in ("АНГЛІЯ", "БРИТАНІЯ", "UK", "U.K.", "UNITED KINGDOM", "ВБ", "GREAT BRITAIN", "+44", "ЮК", "У.К."): return "ВЕЛИКОБРИТАНІЯ"
-    if n in ("USA", "U.S.A.", "UNITED STATES", "UNITED STATES OF AMERICA", "ШТАТИ", "АМЕРИКА", "US", "U.S."): return "США"
-    if n in ("ITALY","ИТАЛИЯ","ІТАЛІЯ","ITALIA","+39"): return "ІТАЛІЯ"
-    if n in ("МОЛДОВА","MOLDOVA","+373"): return "МОЛДОВА"
+    # Пряме співпадіння з ключами PRICE_TIERS / DISPLAY
+    if n in PRICE_TIERS or n in DISPLAY:
+        return n
+    # Явні маппінги
+    ALIASES = {
+        "ВЕЛИКОБРИТАНІЯ": ["АНГЛІЯ", "БРИТАНІЯ", "UK", "U.K.", "UNITED KINGDOM", "ВБ", "GREAT BRITAIN", "+44", "ЮК", "У.К."],
+        "США": ["USA", "U.S.A.", "UNITED STATES", "UNITED STATES OF AMERICA", "ШТАТИ", "АМЕРИКА", "US", "U.S."],
+        "ІТАЛІЯ": ["ITALY", "ИТАЛИЯ", "ITALIA", "+39"],
+        "МОЛДОВА": ["MOLDOVA", "+373"],
+        "НІДЕРЛАНДИ": ["ГОЛЛАНДІЯ", "HOLLAND", "NETHERLANDS", "+31"],
+        "НІМЕЧЧИНА": ["ГЕРМАНІЯ", "GERMANY", "DEUTSCHLAND", "+49"],
+        "ФРАНЦІЯ": ["FRANCE", "+33"],
+        "ІСПАНІЯ": ["ИСПАНІЯ", "SPAIN", "+34"],
+        "ЧЕХІЯ": ["CZECH", "CZECH REPUBLIC", "CZECHIA", "+420"],
+        "ПОЛЬЩА": ["POLAND", "ПОЛЬША"],
+        "ЛИТВА": ["LITHUANIA"],
+        "ЛАТВІЯ": ["LATVIA"],
+        "КАЗАХСТАН": ["KAZAKHSTAN", "+7"],
+        "МАРОККО": ["MOROCCO"],
+    }
+    for canonical, aliases in ALIASES.items():
+        if n in aliases:
+            return canonical
+    # Підстрочний пошук за COUNTRY_KEYWORDS
+    n_low = n.lower()
+    for key, subs in COUNTRY_KEYWORDS.items():
+        for s in subs:
+            if s in n_low:
+                return key
     return n
 
 def canonical_operator(op: Optional[str]) -> Optional[str]:
@@ -218,7 +272,6 @@ def render_order_for_group(order: OrderData, paid: bool) -> str:
 
 def render_ussd_targets(targets: List[Dict[str, str]]) -> str:
     result_lines = []
-    FALLBACK_PLASTIC_MSG = "Номер вказаний на пластику сім-карти"
     for t in targets:
         country = normalize_country(t.get("country", "")).upper()
         if not country: continue
@@ -264,10 +317,10 @@ def order_signature(order: OrderData) -> str:
 
 # ==== Парсинг JSON в об'єкти ====
 def try_parse_order_json(text: str) -> Optional[OrderData]:
-    m = ORDER_JSON_RE.search(text or "")
-    if not m: return None
+    json_str = _extract_json_block(text or "")
+    if not json_str: return None
     try:
-        data = json.loads(m.group(0))
+        data = json.loads(json_str)
         items = [OrderItem(country=i["country"], qty=int(i["qty"]), operator=i.get("operator")) for i in data.get("items", [])]
         return OrderData(
             full_name=data.get("full_name", "").strip(),
@@ -282,18 +335,18 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
         return None
 
 def try_parse_price_json(text: str) -> Optional[List[str]]:
-    m = PRICE_JSON_RE.search(text or "")
-    if not m: return None
+    json_str = _extract_json_block(text or "")
+    if not json_str: return None
     try:
-        data = json.loads(m.group(0))
+        data = json.loads(json_str)
         return data["countries"] if data.get("ask_prices") is True and isinstance(data.get("countries"), list) else None
     except Exception: return None
 
 def try_parse_ussd_json(text: str) -> Optional[List[Dict[str, str]]]:
-    m = USSD_JSON_RE.search(text or "")
-    if not m: return None
+    json_str = _extract_json_block(text or "")
+    if not json_str: return None
     try:
-        data = json.loads(m.group(0))
+        data = json.loads(json_str)
         if data.get("ask_ussd") is True and isinstance(data.get("targets"), list):
             return [t for t in data["targets"] if isinstance(t, dict) and t.get("country")] or None
         return None
