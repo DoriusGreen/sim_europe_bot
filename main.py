@@ -15,13 +15,22 @@ logger = logging.getLogger(__name__)
 
 # ===== /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_message:
-        await update.effective_message.reply_text("Вітаю! Я допоможу вам оформити замовлення на SIM-карти, а також постараюсь надати відповіді на всі ваші запитання.")
+    msg = update.effective_message
+    if not msg: return
+    # Ігноруємо прямі повідомлення боту — працюємо лише як бізнес-асистент
+    if msg.chat.type == "private" and not getattr(msg, "business_connection_id", None):
+        return
+    await msg.reply_text("Вітаю! Я допоможу вам оформити замовлення на SIM-карти, а також постараюсь надати відповіді на всі ваші запитання.")
 
 # ===== Менеджер повідомлень (Головна логіка) =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg: return
+    
+    # Ігноруємо прямі повідомлення боту — працюємо лише як бізнес-асистент або в групі замовлень
+    if msg.chat.type == "private" and not getattr(msg, "business_connection_id", None):
+        return
+    
     raw_user_message = msg.text.strip() if msg.text else ""
     if not raw_user_message: return  # Ігноруємо порожні/нетекстові повідомлення
     
