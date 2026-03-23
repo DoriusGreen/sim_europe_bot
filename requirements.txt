@@ -1,3 +1,2 @@
 python-telegram-bot[webhooks]
 openai>=1.0.0
-aiohttp
