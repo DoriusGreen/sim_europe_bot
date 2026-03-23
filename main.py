@@ -138,21 +138,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "qty" in h: user_payload += f"\n\n[НАГАДУВАННЯ: пункт 4 відомий: {', '.join(h['countries'])} по {h['qty']} шт.]"
         elif "items" in h: user_payload += f"\n\n[НАГАДУВАННЯ: пункт 4 відомий: {h['items']}]"
 
-    # --- 3.5. Якщо чекаємо телефон для пошуку ТТН ---
-    if context.chat_data.get("awaiting_phone_for_ttn"):
-        phone = tools.extract_phone_from_text(raw_user_message)
-        if phone:
-            context.chat_data.pop("awaiting_phone_for_ttn", None)
-            await msg.reply_text("🔍 Шукаю відправлення...")
-            results = await nova_poshta.find_ttns_by_phone(phone)
-            ttn_text = nova_poshta.render_ttn_results(results)
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": ttn_text})
-            await msg.reply_text(ttn_text)
-            return
-        else:
-            # Клієнт написав щось інше — скидаємо очікування, продовжуємо як звичайно
-            context.chat_data.pop("awaiting_phone_for_ttn", None)
+    # --- 3.5. Якщо чекаємо дані (місто та відділення) для пошуку ТТН ---
+    if context.chat_data.get("awaiting_data_for_ttn"):
+        # Спроба витягти номер відділення (цифри) та місто (весь інший текст)
+        m_np = re.search(r'\d+', raw_user_message)
+        if m_np:
+            np_num = m_np.group(0)
+            city = re.sub(r'\d+', '', raw_user_message).strip()
+            # Очищення від зайвих символів (коми, крапки тощо)
+            city = re.sub(r'[^\w\sа-яА-ЯіІїЇєЄґҐ]', '', city).strip()
+            
+            context.chat_data.pop("awaiting_data_for_ttn", None)
+            
+            if city and np_num:
+                await msg.reply_text("🔍 Шукаю відправлення...")
+                results = await nova_poshta.find_ttns_by_city_and_np(city, np_num)
+                ttn_text = nova_poshta.render_ttn_results(results)
+                history.append({"role": "user", "content": raw_user_message})
+                history.append({"role": "assistant", "content": ttn_text})
+                await msg.reply_text(ttn_text)
+                return
+        
+        # Якщо парсинг не вдався, просто знімаємо статус і йдемо далі (GPT може розпізнати як звичайне повідомлення)
+        context.chat_data.pop("awaiting_data_for_ttn", None)
 
     # --- 4. Force Point 4 (Спроба дозбирати замовлення) ---
     if context.chat_data.get("awaiting_missing") == {4}:
@@ -177,9 +185,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             summary = tools.render_order(forced)
             context.chat_data["last_order_sig"] = tools.order_signature(forced)
             context.chat_data["last_order_time"] = time.time()
-            context.chat_data["order_completed_at"] = time.time()  # <-- мітка завершення
-            context.chat_data["last_order_total"] = tools.calc_order_total(forced)  # <-- сума для крипти
-            context.chat_data["last_order_phone"] = tools.format_phone(forced.phone)  # <-- телефон для ТТН
+            context.chat_data["order_completed_at"] = time.time()
+            context.chat_data["last_order_total"] = tools.calc_order_total(forced)
+            
+            # ЗБЕРІГАЄМО МІСТО ТА ВІДДІЛЕННЯ ДЛЯ ТТН
+            context.chat_data["last_order_city"] = forced.city
+            context.chat_data["last_order_np"] = forced.np
+            context.chat_data["last_order_address"] = forced.address
+            
             context.chat_data.pop("awaiting_missing", None)
             context.chat_data.pop("point4_hint", None)
             
@@ -267,9 +280,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary = tools.render_order(parsed)
         context.chat_data["last_order_sig"] = sig
         context.chat_data["last_order_time"] = time.time()
-        context.chat_data["order_completed_at"] = time.time()  # <-- мітка завершення
-        context.chat_data["last_order_total"] = tools.calc_order_total(parsed)  # <-- сума для крипти
-        context.chat_data["last_order_phone"] = tools.format_phone(parsed.phone)  # <-- телефон для ТТН
+        context.chat_data["order_completed_at"] = time.time()
+        context.chat_data["last_order_total"] = tools.calc_order_total(parsed)
+        
+        # ЗБЕРІГАЄМО МІСТО ТА ВІДДІЛЕННЯ ДЛЯ ТТН
+        context.chat_data["last_order_city"] = parsed.city
+        context.chat_data["last_order_np"] = parsed.np
+        context.chat_data["last_order_address"] = parsed.address
+        
         context.chat_data.pop("awaiting_missing", None)
         context.chat_data.pop("point4_hint", None)
         
@@ -304,27 +322,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # В) Запит ТТН
     if tools.try_parse_ttn_json(reply_text):
-        # Спершу шукаємо телефон: з замовлення, потім з історії
-        phone = context.chat_data.get("last_order_phone")
-        if not phone:
-            phone = tools.extract_phone_from_history(history)
-        if not phone:
-            phone = tools.extract_phone_from_text(raw_user_message)
+        # Отримуємо дані про доставку з останнього замовлення
+        city = context.chat_data.get("last_order_city")
+        np_num = context.chat_data.get("last_order_np")
+        address = context.chat_data.get("last_order_address")
 
-        if phone:
-            await msg.reply_text("🔍 Шукаю відправлення...")
-            results = await nova_poshta.find_ttns_by_phone(phone)
-            ttn_text = nova_poshta.render_ttn_results(results)
-            history.append({"role": "user", "content": raw_user_message})
-            history.append({"role": "assistant", "content": ttn_text})
-            await msg.reply_text(ttn_text)
-        else:
-            # Телефон не знайдено — питаємо у клієнта
-            context.chat_data["awaiting_phone_for_ttn"] = True
-            ask_text = "Щоб знайти вашу посилку, надішліть, будь ласка, номер телефону, на який оформлене замовлення."
+        if not city or not np_num:
+            # Міста/відділення немає в пам'яті — питаємо у клієнта
+            context.chat_data["awaiting_data_for_ttn"] = True
+            ask_text = "Щоб знайти вашу посилку, напишіть, будь ласка, ваше **місто** та **номер відділення** (або поштомату) Нової Пошти."
             history.append({"role": "user", "content": raw_user_message})
             history.append({"role": "assistant", "content": ask_text})
             await msg.reply_text(ask_text)
+            return
+
+        # Якщо доставка адресна (np == "0"), шукаємо по адресі
+        search_np = address if np_num == "0" and address else np_num
+        
+        await msg.reply_text("🔍 Шукаю відправлення...")
+        results = await nova_poshta.find_ttns_by_city_and_np(city, search_np)
+        ttn_text = nova_poshta.render_ttn_results(results)
+        
+        history.append({"role": "user", "content": raw_user_message})
+        history.append({"role": "assistant", "content": ttn_text})
+        await msg.reply_text(ttn_text)
         return
 
     # Г) Запит цін
