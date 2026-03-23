@@ -420,36 +420,6 @@ def try_parse_ussd_json(text: str) -> Optional[List[Dict[str, str]]]:
         return None
     except Exception: return None
 
-def try_parse_ttn_json(text: str) -> bool:
-    """Перевіряє, чи GPT повернув JSON з запитом ТТН."""
-    json_str = _extract_json_block(text or "")
-    if not json_str: return False
-    try:
-        data = json.loads(json_str)
-        return data.get("ask_ttn") is True
-    except Exception: return False
-
-PHONE_RE = re.compile(r"(?:\+?38)?[- ]?(?:0\d{2})[- ]?\d{3}[- ]?\d{2}[- ]?\d{2}|\b0\d{9}\b|\b380\d{9}\b")
-
-def extract_phone_from_text(text: str) -> Optional[str]:
-    """Витягує номер телефону з тексту."""
-    m = PHONE_RE.search(text or "")
-    if m:
-        digits = re.sub(r"\D", "", m.group(0))
-        if len(digits) == 10 and digits.startswith("0"):
-            return digits
-        if len(digits) == 12 and digits.startswith("380"):
-            return "0" + digits[3:]
-    return None
-
-def extract_phone_from_history(history: list) -> Optional[str]:
-    """Шукає номер телефону в історії чату (від останнього до першого)."""
-    for entry in reversed(history):
-        phone = extract_phone_from_text(entry.get("content", ""))
-        if phone:
-            return phone
-    return None
-
 def try_parse_manager_order_json(json_text: str) -> Optional[OrderData]:
     return try_parse_order_json(json_text)
 
