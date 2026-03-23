@@ -6,6 +6,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", "8443"))
+NOVA_POSHTA_API_KEY = os.getenv("NOVA_POSHTA_API_KEY", "")
+
+# ==== Акаунти яким бот відповідає напряму (не лише як асистент) ====
+ALLOWED_DIRECT_USERNAMES = {"green_witcher"}
 
 # ==== Константи пам'яті/міток ====
 MAX_TURNS = 10
