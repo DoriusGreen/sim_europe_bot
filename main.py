@@ -8,17 +8,29 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import config
 import tools
 import ai
+import nova_poshta
 
 # Налаштування логів
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def _is_direct_allowed(msg) -> bool:
+    """Перевіряє чи дозволено прямі повідомлення боту від цього користувача."""
+    if getattr(msg, "business_connection_id", None):
+        return True  # Бізнес-асистент — завжди ок
+    if msg.chat.type != "private":
+        return True  # Групи — завжди ок
+    # Перевіряємо whitelist
+    if msg.from_user and msg.from_user.username:
+        if msg.from_user.username.lower() in config.ALLOWED_DIRECT_USERNAMES:
+            return True
+    return False
+
 # ===== /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg: return
-    # Ігноруємо прямі повідомлення боту — працюємо лише як бізнес-асистент
-    if msg.chat.type == "private" and not getattr(msg, "business_connection_id", None):
+    if not _is_direct_allowed(msg):
         return
     await msg.reply_text("Вітаю! Я допоможу вам оформити замовлення на SIM-карти, а також постараюсь надати відповіді на всі ваші запитання.")
 
@@ -27,8 +39,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg: return
     
-    # Ігноруємо прямі повідомлення боту — працюємо лише як бізнес-асистент або в групі замовлень
-    if msg.chat.type == "private" and not getattr(msg, "business_connection_id", None):
+    # Ігноруємо прямі повідомлення боту (окрім дозволених акаунтів)
+    if not _is_direct_allowed(msg):
         return
     
     raw_user_message = msg.text.strip() if msg.text else ""
@@ -126,6 +138,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "qty" in h: user_payload += f"\n\n[НАГАДУВАННЯ: пункт 4 відомий: {', '.join(h['countries'])} по {h['qty']} шт.]"
         elif "items" in h: user_payload += f"\n\n[НАГАДУВАННЯ: пункт 4 відомий: {h['items']}]"
 
+    # --- 3.5. Якщо чекаємо телефон для пошуку ТТН ---
+    if context.chat_data.get("awaiting_phone_for_ttn"):
+        phone = tools.extract_phone_from_text(raw_user_message)
+        if phone:
+            context.chat_data.pop("awaiting_phone_for_ttn", None)
+            await msg.reply_text("🔍 Шукаю відправлення...")
+            results = await nova_poshta.find_ttns_by_phone(phone)
+            ttn_text = nova_poshta.render_ttn_results(results)
+            history.append({"role": "user", "content": raw_user_message})
+            history.append({"role": "assistant", "content": ttn_text})
+            await msg.reply_text(ttn_text)
+            return
+        else:
+            # Клієнт написав щось інше — скидаємо очікування, продовжуємо як звичайно
+            context.chat_data.pop("awaiting_phone_for_ttn", None)
+
     # --- 4. Force Point 4 (Спроба дозбирати замовлення) ---
     if context.chat_data.get("awaiting_missing") == {4}:
         force_json = await ai.ask_gpt_force_point4(history, user_payload)
@@ -151,6 +179,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data["last_order_time"] = time.time()
             context.chat_data["order_completed_at"] = time.time()  # <-- мітка завершення
             context.chat_data["last_order_total"] = tools.calc_order_total(forced)  # <-- сума для крипти
+            context.chat_data["last_order_phone"] = tools.format_phone(forced.phone)  # <-- телефон для ТТН
             context.chat_data.pop("awaiting_missing", None)
             context.chat_data.pop("point4_hint", None)
             
@@ -240,6 +269,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data["last_order_time"] = time.time()
         context.chat_data["order_completed_at"] = time.time()  # <-- мітка завершення
         context.chat_data["last_order_total"] = tools.calc_order_total(parsed)  # <-- сума для крипти
+        context.chat_data["last_order_phone"] = tools.format_phone(parsed.phone)  # <-- телефон для ТТН
         context.chat_data.pop("awaiting_missing", None)
         context.chat_data.pop("point4_hint", None)
         
@@ -272,7 +302,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(fallback)
         return
 
-    # В) Запит цін
+    # В) Запит ТТН
+    if tools.try_parse_ttn_json(reply_text):
+        # Спершу шукаємо телефон: з замовлення, потім з історії
+        phone = context.chat_data.get("last_order_phone")
+        if not phone:
+            phone = tools.extract_phone_from_history(history)
+        if not phone:
+            phone = tools.extract_phone_from_text(raw_user_message)
+
+        if phone:
+            await msg.reply_text("🔍 Шукаю відправлення...")
+            results = await nova_poshta.find_ttns_by_phone(phone)
+            ttn_text = nova_poshta.render_ttn_results(results)
+            history.append({"role": "user", "content": raw_user_message})
+            history.append({"role": "assistant", "content": ttn_text})
+            await msg.reply_text(ttn_text)
+        else:
+            # Телефон не знайдено — питаємо у клієнта
+            context.chat_data["awaiting_phone_for_ttn"] = True
+            ask_text = "Щоб знайти вашу посилку, надішліть, будь ласка, номер телефону, на який оформлене замовлення."
+            history.append({"role": "user", "content": raw_user_message})
+            history.append({"role": "assistant", "content": ask_text})
+            await msg.reply_text(ask_text)
+        return
+
+    # Г) Запит цін
     price_countries = tools.try_parse_price_json(reply_text)
     if price_countries is not None:
         want_all = any(str(c).upper() == "ALL" for c in price_countries)
@@ -313,7 +368,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data.pop("awaiting_missing", None)
         return
 
-    # Г) Запит USSD
+    # Ґ) Запит USSD
     ussd_targets = tools.try_parse_ussd_json(reply_text)
     if ussd_targets is not None:
         if ussd_targets:
@@ -329,7 +384,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(txt)
         return
 
-    # Ґ) Звичайний текст або уточнення пунктів
+    # Д) Звичайний текст або уточнення пунктів
     missing = tools.missing_points_from_reply(reply_text)
     if missing: context.chat_data["awaiting_missing"] = missing
     else: 
