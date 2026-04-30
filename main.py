@@ -183,7 +183,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Рівень 2: Не ack, але замовлення нещодавно оформлене → підказка для GPT
     if order_is_recent:
-        user_payload += "\n\n[СИСТЕМНЕ НАГАДУВАННЯ: замовлення щойно оформлене. НЕ генеруй повторний JSON замовлення, якщо клієнт не просить ЯВНО зробити НОВЕ замовлення з новими даними.]"
+        user_payload += "\n\n[СИСТЕМНЕ НАГАДУВАННЯ: замовлення щойно оформлене. НЕ генеруй повторний JSON, якщо клієнт просто підтверджує або ставить запитання. АЛЕ якщо клієнт хоче ЗМІНИТИ замовлення (іншу кількість, іншу країну тощо) — згенеруй новий JSON з \"edited\": true.]"
 
     # --- 5. Основний запит до GPT ---
     reply_text = await ai.ask_gpt_main(history, user_payload)
@@ -216,24 +216,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not valid_items: return
         parsed.items = valid_items
 
-        # Перевірка дублікатів (Рівень 3)
+        # Перевірка дублікатів (Рівень 3) — пропускаємо для відредагованих замовлень
         sig = tools.order_signature(parsed)
-        last_sig = context.chat_data.get("last_order_sig")
-        last_time = context.chat_data.get("last_order_time", 0)
-        time_since_last = time.time() - last_time
-        if last_sig:
-            # Точне співпадіння сигнатури — блокуємо протягом 20 хв
-            if sig == last_sig and time_since_last <= config.ORDER_DUP_WINDOW_SEC:
-                logger.info("Duplicate order blocked (exact sig match)")
-                context.chat_data.pop("awaiting_missing", None)
-                return
-            # Нечітке (ті самі товари) — блокуємо лише протягом 3 хв,
-            # щоб не заблокувати те саме замовлення для іншої людини
-            if time_since_last <= config.ORDER_COOLDOWN_SEC:
-                if tools.items_signature(parsed) == tools.items_signature_from_sig(last_sig):
-                    logger.info("Duplicate order blocked (same items within cooldown)")
+        if not parsed.edited:
+            last_sig = context.chat_data.get("last_order_sig")
+            last_time = context.chat_data.get("last_order_time", 0)
+            time_since_last = time.time() - last_time
+            if last_sig:
+                # Точне співпадіння сигнатури — блокуємо протягом 20 хв
+                if sig == last_sig and time_since_last <= config.ORDER_DUP_WINDOW_SEC:
+                    logger.info("Duplicate order blocked (exact sig match)")
                     context.chat_data.pop("awaiting_missing", None)
                     return
+                # Нечітке (ті самі товари) — блокуємо лише протягом 3 хв,
+                # щоб не заблокувати те саме замовлення для іншої людини
+                if time_since_last <= config.ORDER_COOLDOWN_SEC:
+                    if tools.items_signature(parsed) == tools.items_signature_from_sig(last_sig):
+                        logger.info("Duplicate order blocked (same items within cooldown)")
+                        context.chat_data.pop("awaiting_missing", None)
+                        return
 
         summary = tools.render_order(parsed)
         context.chat_data["last_order_sig"] = sig
@@ -246,14 +247,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "user", "content": raw_user_message})
         history.append({"role": "assistant", "content": summary})
         await msg.reply_text(summary)
-        await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
+
+        if parsed.edited:
+            await msg.reply_text("Замовлення оновлено! 😊")
+        else:
+            await msg.reply_text("Дякуємо за замовлення, воно буде відправлено протягом 24 годин. 😊")
         
         # === АВТО-ПОВІДОМЛЕННЯ З КОДАМИ ===
         post_order_text = tools.render_post_order_info(parsed)
         if post_order_text:
             await msg.reply_text(post_order_text)
 
-        try: await context.bot.send_message(config.ORDER_FORWARD_CHAT_ID, f"@{msg.from_user.username}\n{summary}" if msg.from_user.username else summary)
+        # === Пересилання в групу замовлень ===
+        forward_text = summary
+        if parsed.edited:
+            forward_text += "\n\n⚠️ Примітка: Замовлення відредаговане клієнтом. Потребує перевірки."
+        if msg.from_user and msg.from_user.username:
+            forward_text = f"@{msg.from_user.username}\n{forward_text}"
+        try: await context.bot.send_message(config.ORDER_FORWARD_CHAT_ID, forward_text)
         except Exception as e: logger.warning(f"Forward error: {e}")
         return
 
