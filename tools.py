@@ -92,6 +92,7 @@ COUNTRY_KEYWORDS = {
     "ЛАТВІЯ": ["латв", "latvia"],
     "КАЗАХСТАН": ["казах", "kazakh", "+7"],
     "МАРОККО": ["марок", "morocc"],
+    "ЕСТОНІЯ": ["естон", "эстон", "eston", "+372"],
 }
 
 # ==== Допоміжні функції нормалізації ====
@@ -116,6 +117,7 @@ def normalize_country(name: str) -> str:
         "ЛАТВІЯ": ["LATVIA"],
         "КАЗАХСТАН": ["KAZAKHSTAN", "+7"],
         "МАРОККО": ["MOROCCO"],
+        "ЕСТОНІЯ": ["ESTONIA", "ЭСТОНИЯ", "+372"],
     }
     for canonical, aliases in ALIASES.items():
         if n in aliases:
