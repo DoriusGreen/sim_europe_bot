@@ -22,6 +22,7 @@ class OrderData:
     np: str
     items: List[OrderItem]
     address: Optional[str] = None
+    edited: bool = False
 
 # ==== Регулярні вирази ====
 def _extract_json_block(text: str) -> Optional[str]:
@@ -396,7 +397,8 @@ def try_parse_order_json(text: str) -> Optional[OrderData]:
             city=data.get("city", "").strip(),
             np=str(data.get("np", "")).strip(),
             items=items,
-            address=(data.get("address") or "").strip() or None
+            address=(data.get("address") or "").strip() or None,
+            edited=bool(data.get("edited", False))
         )
     except Exception as e:
         logger.warning(f"JSON parse error: {e}")
