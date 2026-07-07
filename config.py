@@ -11,6 +11,7 @@ PORT = int(os.getenv("PORT", "8443"))
 MAX_TURNS = 10
 ORDER_DUP_WINDOW_SEC = 20 * 60  # 20 хвилин
 ORDER_COOLDOWN_SEC = 3 * 60     # 3 хвилини
+ORDER_EDIT_WINDOW_SEC = 3 * 60 * 60  # 3 години — вікно, в якому замовлення можна редагувати
 
 # ==== ГРУПА ДЛЯ ЗАМОВЛЕНЬ ====
 ORDER_FORWARD_CHAT_ID = int(os.getenv("ORDER_FORWARD_CHAT_ID", "-1003062477534"))
