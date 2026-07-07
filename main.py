@@ -216,6 +216,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not valid_items: return
         parsed.items = valid_items
 
+        # Якщо минуло більше 3 годин з моменту оформлення — це вже НЕ редагування,
+        # а нове замовлення (клієнт написав через кілька днів щодо нового)
+        if parsed.edited:
+            last_order_time = context.chat_data.get("order_completed_at", 0)
+            if (time.time() - last_order_time) > config.ORDER_EDIT_WINDOW_SEC:
+                logger.info("Edit window expired — treating as new order")
+                parsed.edited = False
+
         # Перевірка дублікатів (Рівень 3) — пропускаємо для відредагованих замовлень
         sig = tools.order_signature(parsed)
         if not parsed.edited:
@@ -259,7 +267,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(post_order_text)
 
         # === Пересилання в групу замовлень ===
-        forward_text = summary
+        forward_text = summary.rstrip()
         if parsed.edited:
             forward_text += "\n\n⚠️ Примітка: Замовлення відредаговане клієнтом. Потребує перевірки."
         if msg.from_user and msg.from_user.username:
