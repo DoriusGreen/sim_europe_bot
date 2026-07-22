@@ -172,6 +172,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_completed_at = context.chat_data.get("order_completed_at", 0)
     order_is_recent = (time.time() - order_completed_at) <= config.ORDER_COOLDOWN_SEC
 
+    # Якщо раніше бот перепитав "це нове замовлення?" — обробляємо відповідь клієнта
+    if context.chat_data.get("dup_clarify_pending"):
+        context.chat_data.pop("dup_clarify_pending", None)
+        if tools.is_new_order_confirm(raw_user_message):
+            # Клієнт підтвердив: це справді нове замовлення. Скидаємо сигнатуру,
+            # щоб наступний ідентичний JSON пройшов як нове замовлення.
+            context.chat_data.pop("last_order_sig", None)
+            user_payload += "\n\n[СИСТЕМНЕ: клієнт підтвердив НОВЕ замовлення з тими самими даними. Згенеруй JSON замовлення повторно.]"
+        # якщо не підтвердив — просто йдемо далі, GPT відповість як консультант
+
     # Рівень 1: Ack-повідомлення після щойно оформленого замовлення → не кличемо GPT
     if order_is_recent and tools.is_ack_message(raw_user_message):
         logger.info(f"Ack after order intercepted: '{raw_user_message}'")
@@ -243,6 +253,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.info("Duplicate order blocked (same items within cooldown)")
                         context.chat_data.pop("awaiting_missing", None)
                         return
+                # ДОВГОСТРОКОВИЙ захист: якщо ПІБ+телефон+товари ІДЕНТИЧНІ останньому
+                # замовленню — це майже напевно помилкове дублювання (GPT повторив
+                # замовлення з історії у відповідь на скаргу/запитання/реакцію).
+                # Блокуємо незалежно від часу, бо реальне повторне замовлення
+                # на ті самі дані — велика рідкість.
+                if sig == last_sig:
+                    logger.info("Duplicate order blocked (identical to last order, any time)")
+                    context.chat_data.pop("awaiting_missing", None)
+                    context.chat_data["dup_clarify_pending"] = True  # чекаємо підтвердження нового замовлення
+                    # Не мовчимо повністю — питаємо, чи це нове замовлення
+                    clarify = ("Бачу, що дані збігаються з вашим попереднім замовленням. "
+                               "Ви хочете оформити ще одне таке саме замовлення, чи це запитання щодо вже оформленого? "
+                               "Якщо потрібне нове — напишіть, будь ласка, «так, нове замовлення».")
+                    history.append({"role": "user", "content": raw_user_message})
+                    history.append({"role": "assistant", "content": clarify})
+                    await msg.reply_text(clarify)
+                    return
 
         summary = tools.render_order(parsed)
         context.chat_data["last_order_sig"] = sig
