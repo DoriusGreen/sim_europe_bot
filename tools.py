@@ -77,6 +77,20 @@ def is_ack_message(text: str) -> bool:
         return False
     return any(r.match(t) for r in _ACK_COMPILED)
 
+_NEW_ORDER_CONFIRM_RE = re.compile(
+    r"(так|да|yes|ага|угу|вірно|правильно).{0,15}(нов|ще|друг|повтор|додатков)"
+    r"|(нов|ще одне|другое|повторн|додатков).{0,15}(замовлен|заказ)"
+    r"|^\s*(так,?\s*нове замовлення|нове замовлення|ще одне замовлення|повторити замовлення)\s*$",
+    re.IGNORECASE
+)
+
+def is_new_order_confirm(text: str) -> bool:
+    """Перевіряє, чи клієнт підтвердив, що хоче саме НОВЕ (повторне) замовлення."""
+    t = (text or "").strip()
+    if not t or len(t) > 60:
+        return False
+    return bool(_NEW_ORDER_CONFIRM_RE.search(t))
+
 FALLBACK_PLASTIC_MSG = "Номер вказаний на пластику сім-карти"
 
 COUNTRY_KEYWORDS = {
